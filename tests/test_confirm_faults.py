@@ -31,7 +31,9 @@ RSIM_URL = "http://localhost:8081"
 WORKER_URL = "http://localhost:8083"
 CONFIRM_TIMEOUT_S = 40.0
 POLL_EVERY_S = 0.2
-CONFIRMED_OR_BEYOND = frozenset({"confirmed", "being_prepared", "ready"})
+CONFIRMED_OR_BEYOND = frozenset(
+    {"confirmed", "being_prepared", "ready", "out_for_delivery", "delivered"}
+)
 LEASE_LIFECYCLE_CAUSES = frozenset(
     {
         "lease",
@@ -61,7 +63,7 @@ def _http(
 
 
 def _set_faults(mode: str) -> dict[str, Any]:
-    response = _http("POST", f"{RSIM_URL}/admin/faults", json={"mode": mode})
+    response = _http("POST", f"{RSIM_URL}/admin/faults", json={"mode": mode, "mix": "off"})
     assert response.status_code == 200, response.text
     body = response.json()
     assert isinstance(body, dict)
@@ -72,7 +74,7 @@ def _set_faults(mode: str) -> dict[str, Any]:
 
 
 def _clear_faults() -> None:
-    response = _http("POST", f"{RSIM_URL}/admin/faults", json={"mode": "clear"})
+    response = _http("POST", f"{RSIM_URL}/admin/faults", json={"mode": "clear", "mix": "off"})
     assert response.status_code == 200, response.text
     assert response.json()["mode"] == "off"
     assert response.json()["mix"] == "off"

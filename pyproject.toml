@@ -27,6 +27,7 @@ dev = [
 
 [project.scripts]
 restaurant-sim = "order_pipeline.restaurant.__main__:main"
+courier-sim = "order_pipeline.courier.__main__:main"
 worker = "order_pipeline.worker.__main__:main"
 
 [tool.setuptools.packages.find]
@@ -42,7 +43,7 @@ select = ["E", "F", "I", "UP"]
 
 [tool.mypy]
 python_version = "3.12"
-mypy_path = "src"
+mypy_path = "src:."
 packages = ["order_pipeline"]
 files = ["src", "tests", "alembic"]
 strict = true
@@ -50,7 +51,7 @@ plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 addopts = "-q"
 
 [tool.pydantic-mypy]

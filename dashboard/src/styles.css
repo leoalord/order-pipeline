@@ -1,0 +1,156 @@
+:root {
+  color: #14202b;
+  background: #f4f1ea;
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, "Times New Roman", serif;
+  line-height: 1.4;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+a {
+  color: inherit;
+}
+
+.shell-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.9rem 1.4rem;
+  border-bottom: 1px solid #d7d0c4;
+  background: #fffdf8;
+}
+
+.shell-brand {
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.shell-nav {
+  display: flex;
+  gap: 1rem;
+}
+
+.page {
+  padding: 1.2rem 1.4rem 2.4rem;
+}
+
+h1,
+h2,
+h3 {
+  font-weight: 650;
+  margin: 0 0 0.6rem;
+}
+
+h1 {
+  font-size: 1.6rem;
+}
+
+h2 {
+  font-size: 1.15rem;
+  margin-top: 1.2rem;
+}
+
+h3 {
+  font-size: 0.95rem;
+}
+
+.pane {
+  margin-bottom: 0.4rem;
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.card-grid.stages {
+  grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+}
+
+.card {
+  background: #fffdf8;
+  border: 1px solid #d7d0c4;
+  border-radius: 6px;
+  padding: 0.85rem 0.95rem;
+}
+
+.metric {
+  font-size: 1.7rem;
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.lede,
+.pane-intro,
+.group-label,
+.hint,
+.error {
+  margin: 0.4rem 0 0;
+  font-size: 0.9rem;
+  color: #5c564c;
+}
+
+.lede,
+.pane-intro {
+  max-width: 42rem;
+  margin: 0 0 0.85rem;
+}
+
+.group-label {
+  margin: 0 0 0.4rem;
+  font-size: 0.8rem;
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+}
+
+.card .hint {
+  margin: 0 0 0.55rem;
+}
+
+.error {
+  color: #8b1e1e;
+}
+
+dl {
+  display: grid;
+  gap: 0.25rem 0.8rem;
+  margin: 0;
+  grid-template-columns: auto 1fr;
+}
+
+dt {
+  color: #5c564c;
+}
+
+dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.card.trace label {
+  display: grid;
+  gap: 0.3rem;
+  max-width: 28rem;
+  margin-bottom: 0.7rem;
+}
+
+.card.trace input {
+  font: inherit;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid #d7d0c4;
+  border-radius: 4px;
+}
+
+.trace-body ol {
+  margin: 0.4rem 0 0;
+  padding-left: 1.2rem;
+}

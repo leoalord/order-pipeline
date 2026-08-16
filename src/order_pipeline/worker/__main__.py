@@ -9,8 +9,9 @@ from sqlalchemy import create_engine
 
 from order_pipeline.worker.chassis import Worker
 from order_pipeline.worker.deps import DepCaps
+from order_pipeline.worker.dispatch import CourierHandlers
 from order_pipeline.worker.health import create_health_app
-from order_pipeline.worker.http import RestaurantClient
+from order_pipeline.worker.http import CourierClient, RestaurantClient
 from order_pipeline.worker.kitchen import KitchenHandlers
 from order_pipeline.worker.settings import WorkerSettings
 
@@ -20,10 +21,14 @@ def main() -> None:
     engine = create_engine(settings.database_url)
     caps = DepCaps(settings)
     restaurant = RestaurantClient(settings, caps)
+    courier = CourierClient(settings, caps)
     worker = Worker(settings, engine, caps=caps)
     kitchen = KitchenHandlers(settings, restaurant, now_fn=lambda: worker.now_fn())
+    rides = CourierHandlers(settings, courier, now_fn=lambda: worker.now_fn())
     worker.register("confirm", kitchen.confirm)
     worker.register("poll_cook", kitchen.poll_cook)
+    worker.register("dispatch", rides.dispatch)
+    worker.register("poll_ride", rides.poll_ride)
     health_app = create_health_app(engine)
 
     async def runner() -> None:

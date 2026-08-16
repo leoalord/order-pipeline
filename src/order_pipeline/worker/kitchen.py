@@ -10,6 +10,7 @@ from uuid import UUID
 import httpx
 
 from order_pipeline.worker.classify import classify_status
+from order_pipeline.worker.dispatch import DISPATCH_WORK_TYPE, dispatch_idempotency_key
 from order_pipeline.worker.plugin import (
     ClaimedWork,
     GuardedTransition,
@@ -145,6 +146,13 @@ class KitchenHandlers:
                     expected_state="being_prepared",
                     to_state="ready",
                     cause=CAUSE_READY,
+                ),
+                next_work=(
+                    NextWork(
+                        work_type=DISPATCH_WORK_TYPE,
+                        idempotency_key=dispatch_idempotency_key(claimed.order_id),
+                        next_attempt_at=self._now(),
+                    ),
                 ),
                 result_payload=payload,
             )

@@ -33,8 +33,8 @@ def test_code_defaults() -> None:
     assert settings.cook_s.burrito == 25.0
     assert settings.extra_item_s == 5.0
     assert settings.rail_fuse == 80
-    assert settings.flaky_5xx_pct == 0.0
-    assert settings.flaky_drop_pct == 0.0
+    assert settings.flaky_5xx_pct == 3.0
+    assert settings.flaky_drop_pct == 2.0
     assert settings.sim_timeout_s == 2.0
     assert settings.port == 8081
 
@@ -43,7 +43,7 @@ def test_unprefixed_env_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FLAKY_5XX_PCT", "99")
     monkeypatch.setenv("BUSY_MULTIPLE", "1")
     settings = RSIMSettings()
-    assert settings.flaky_5xx_pct == 0.0
+    assert settings.flaky_5xx_pct == 3.0
     assert settings.busy_multiple == 3
 
 

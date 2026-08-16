@@ -31,8 +31,12 @@ def clock() -> MutableClock:
 
 @pytest.fixture
 def client(tmp_path: Path, clock: MutableClock) -> Iterator[TestClient]:
-    settings = RSIMSettings(ledger_path=tmp_path / "ledger.sqlite")
-    app = build_app(settings, now_fn=clock)
+    settings = RSIMSettings(
+        ledger_path=tmp_path / "ledger.sqlite",
+        flaky_5xx_pct=0.0,
+        flaky_drop_pct=0.0,
+    )
+    app = build_app(settings, now_fn=clock, blackout_hang_s=0.0)
     with TestClient(app) as test_client:
         yield test_client
 
@@ -155,3 +159,56 @@ def test_clear_shows_mix_off(client: TestClient) -> None:
     fetched = client.get("/admin/faults")
     assert fetched.json()["mix"] == "off"
     assert fetched.json()["mode"] == "off"
+    assert fetched.json()["blackout_remaining_s"] == 0
+
+    missing = client.post("/admin/faults", json={"mode": "blackout"})
+    assert missing.status_code == 422
+
+
+def test_blackout_post_get_then_expires(client: TestClient, clock: MutableClock) -> None:
+    armed = client.post("/admin/faults", json={"mode": "blackout", "seconds": 2})
+    assert armed.status_code == 200, armed.text
+    body = armed.json()
+    assert body["mode"] == "blackout"
+    assert body["blackout_remaining_s"] == pytest.approx(2.0)
+    fetched = client.get("/admin/faults")
+    assert fetched.json()["mode"] == "blackout"
+    assert fetched.json()["blackout_remaining_s"] > 0
+
+    key = f"unit-blackout-{uuid.uuid4()}"
+    try:
+        dropped = _accept(client, ["chips"], key)
+    except (httpx.TransportError, RuntimeError, AssertionError):
+        pass
+    else:
+        pytest.fail(f"blackout returned a complete response: {dropped.status_code} {dropped.text}")
+    assert client.get("/admin/ledger").json()["counts"].get(key) is None
+
+    clock.now = clock.now + timedelta(seconds=2)
+    expired = client.get("/admin/faults")
+    assert expired.json()["mode"] == "off"
+    assert expired.json()["blackout_remaining_s"] == 0
+    ok = _accept(client, ["chips"], key)
+    assert ok.status_code == 200, ok.text
+
+
+def test_default_settings_show_mix_on(tmp_path: Path) -> None:
+    settings = RSIMSettings(ledger_path=tmp_path / "default-mix.sqlite")
+    assert settings.flaky_5xx_pct == 3.0
+    assert settings.flaky_drop_pct == 2.0
+    app = build_app(settings)
+    with TestClient(app) as test_client:
+        fetched = test_client.get("/admin/faults")
+        assert fetched.status_code == 200
+        body = fetched.json()
+        assert body["mix"] == "on"
+        assert body["flaky_5xx_pct"] == 3.0
+        assert body["flaky_drop_pct"] == 2.0
+        assert body["mode"] == "off"
+        assert body["blackout_remaining_s"] == 0
+        off = test_client.post("/admin/faults", json={"mode": "clear", "mix": "off"})
+        assert off.json()["mix"] == "off"
+        assert off.json()["flaky_5xx_pct"] == 0.0
+        on = test_client.post("/admin/faults", json={"mode": "clear", "mix": "on"})
+        assert on.json()["mix"] == "on"
+        assert on.json()["flaky_5xx_pct"] == 3.0

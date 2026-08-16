@@ -19,6 +19,7 @@ from order_pipeline.cancel import CAUSE_CANCEL, CancelOutcome, OrderNotFound, ca
 from order_pipeline.intake import place_order
 from order_pipeline.models import Order, OrderEvent, WorkItem
 from order_pipeline.worker.finalize import CAUSE_INVALID
+from tests.sim_admin import mix_off
 
 TTL_HOURS = 48
 API_URL = "http://localhost:8000"
@@ -202,6 +203,7 @@ def test_http_cancel_missing_order_is_404() -> None:
 
 def test_http_cancel_from_confirmed_applies() -> None:
     """Wait until confirmed so a live worker cannot steal a placed-only cancel."""
+    mix_off()
     place_key = f"http-cancel-confirmed-{uuid.uuid4()}"
     try:
         posted = httpx.post(
@@ -225,6 +227,7 @@ def test_http_cancel_from_confirmed_applies() -> None:
 
 
 def test_http_cancel_after_being_prepared_is_409() -> None:
+    mix_off()
     place_key = f"http-cancel-pivot-{uuid.uuid4()}"
     try:
         posted = httpx.post(
@@ -245,4 +248,9 @@ def test_http_cancel_after_being_prepared_is_409() -> None:
     fetched = _http_get(order_id)
     assert fetched.status_code == 200, fetched.text
     assert fetched.json()["state"] != "cancelled"
-    assert fetched.json()["state"] in {"being_prepared", "ready"}
+    assert fetched.json()["state"] in {
+        "being_prepared",
+        "ready",
+        "out_for_delivery",
+        "delivered",
+    }

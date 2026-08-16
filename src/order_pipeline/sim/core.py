@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -10,6 +11,8 @@ from uuid import uuid4
 
 from order_pipeline.sim.faults import FaultCommand, FaultMode, FaultState
 from order_pipeline.sim.ledger import Effect, EffectLedger
+
+MixSetting = Literal["off", "on"]
 
 
 class QuoteError(Exception):
@@ -44,6 +47,10 @@ class StatusFn(Protocol):
 NowFn = Callable[[], datetime]
 
 
+class Rng(Protocol):
+    def random(self) -> float: ...
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -56,7 +63,7 @@ def isoformat_z(value: datetime) -> str:
 
 @dataclass(frozen=True)
 class AcceptOutcome:
-    action: Literal["ok", "replay", "conflict", "reject", "five_xx", "drop"]
+    action: Literal["ok", "replay", "conflict", "reject", "five_xx", "drop", "blackout"]
     status_code: int
     body: dict[str, Any] | None = None
     detail: str | None = None
@@ -75,41 +82,71 @@ class SimCore:
         flaky_5xx_pct: float,
         flaky_drop_pct: float,
         now_fn: NowFn | None = None,
+        rng: Rng | None = None,
+        blackout_hang_s: float = 0.0,
     ) -> None:
         self.ledger = ledger
         self.faults = faults
         self._quote = quote
         self._status_at = status_at
+        self._boot_5xx_pct = flaky_5xx_pct
+        self._boot_drop_pct = flaky_drop_pct
         self._flaky_5xx_pct = flaky_5xx_pct
         self._flaky_drop_pct = flaky_drop_pct
         self._now = now_fn or _utc_now
+        self._rng = rng or random.Random()
+        self.blackout_hang_s = blackout_hang_s
 
     def ping(self) -> None:
         self.ledger.ping()
 
     def faults_view(self) -> dict[str, Any]:
+        now = self._now()
         mix_off = self._flaky_5xx_pct == 0 and self._flaky_drop_pct == 0
+        remaining = self.faults.blackout_remaining_s(now)
         return {
-            "mode": self.faults.mode.value,
+            "mode": self.faults.effective_mode(now).value,
             "mix": "off" if mix_off else "on",
             "flaky_5xx_pct": self._flaky_5xx_pct,
             "flaky_drop_pct": self._flaky_drop_pct,
+            "blackout_remaining_s": remaining,
         }
 
-    def set_fault_command(self, command: FaultCommand) -> dict[str, Any]:
-        self.faults.set_command(command)
+    def set_fault_command(
+        self,
+        command: FaultCommand,
+        *,
+        seconds: float | None = None,
+        mix: MixSetting | None = None,
+    ) -> dict[str, Any]:
+        self.faults.set_command(command, seconds=seconds, now=self._now())
+        if mix == "off":
+            self._flaky_5xx_pct = 0.0
+            self._flaky_drop_pct = 0.0
+        elif mix == "on":
+            self._flaky_5xx_pct = self._boot_5xx_pct
+            self._flaky_drop_pct = self._boot_drop_pct
         return self.faults_view()
 
     def ledger_counts(self) -> dict[str, int]:
         return self.ledger.counts_by_key()
 
     def accept(self, idempotency_key: str, body: dict[str, Any]) -> AcceptOutcome:
+        now = self._now()
+        mode = self.faults.effective_mode(now)
+        if mode is FaultMode.BLACKOUT:
+            return AcceptOutcome(
+                action="blackout",
+                status_code=0,
+                detail="injected blackout",
+            )
+
         existing = self.ledger.get_by_key(idempotency_key)
         if existing is not None:
             return self._replay(existing, body)
 
         try:
-            quote = self._quote(body, self._now())
+            quote = self._quote(body, now)
         except QuoteError as exc:
             return AcceptOutcome(
                 action="reject",
@@ -117,15 +154,14 @@ class SimCore:
                 detail=exc.detail,
             )
 
-        mode = self.faults.mode
-        if mode is FaultMode.FIVE_XX_BEFORE:
+        injected = mode if mode is not FaultMode.OFF else self._roll_mix()
+        if injected is FaultMode.FIVE_XX_BEFORE:
             return AcceptOutcome(
                 action="five_xx",
                 status_code=500,
                 detail="injected 5xx_before",
             )
 
-        now = self._now()
         effect = Effect(
             idempotency_key=idempotency_key,
             ticket_id=str(uuid4()),
@@ -144,13 +180,13 @@ class SimCore:
                 )
             return self._replay(raced, body)
 
-        if mode is FaultMode.FIVE_XX_AFTER:
+        if injected is FaultMode.FIVE_XX_AFTER:
             return AcceptOutcome(
                 action="five_xx",
                 status_code=500,
                 detail="injected 5xx_after",
             )
-        if mode is FaultMode.DROP:
+        if injected is FaultMode.DROP:
             return AcceptOutcome(action="drop", status_code=0)
 
         return AcceptOutcome(
@@ -170,6 +206,22 @@ class SimCore:
         if effect is None:
             return None
         return self._ticket_body(effect, now=self._now())
+
+    def _roll_mix(self) -> FaultMode | None:
+        """Always-on mix: drop%, then 5xx% split before/after so after-effect is in the mix."""
+        drop_pct = self._flaky_drop_pct
+        five_xx_pct = self._flaky_5xx_pct
+        if drop_pct <= 0 and five_xx_pct <= 0:
+            return None
+        roll = self._rng.random() * 100.0
+        if roll < drop_pct:
+            return FaultMode.DROP
+        if roll < drop_pct + five_xx_pct:
+            # Half the 5xx budget is after-effect (easy wrong turn 4).
+            if self._rng.random() < 0.5:
+                return FaultMode.FIVE_XX_BEFORE
+            return FaultMode.FIVE_XX_AFTER
+        return None
 
     def _replay(self, existing: Effect, body: dict[str, Any]) -> AcceptOutcome:
         try:

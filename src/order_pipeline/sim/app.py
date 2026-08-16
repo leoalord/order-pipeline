@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Annotated, Any
 
 from fastapi import FastAPI, Header, HTTPException
@@ -40,6 +41,10 @@ def mount_sim_routes(app: FastAPI, core: SimCore) -> None:
         idempotency_key: IdempotencyKeyHeader,
     ) -> Response:
         outcome = core.accept(idempotency_key, body)
+        if outcome.action == "blackout":
+            if core.blackout_hang_s > 0:
+                time.sleep(core.blackout_hang_s)
+            return DroppedResponse()
         if outcome.action == "drop":
             return DroppedResponse()
         if outcome.body is None:
