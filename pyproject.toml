@@ -43,7 +43,7 @@ select = ["E", "F", "I", "UP"]
 python_version = "3.12"
 mypy_path = "src"
 packages = ["order_pipeline"]
-files = ["src", "tests"]
+files = ["src", "tests", "alembic"]
 strict = true
 plugins = ["pydantic.mypy"]
 
