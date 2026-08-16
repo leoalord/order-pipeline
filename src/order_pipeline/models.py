@@ -7,12 +7,14 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
     Integer,
     Text,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -60,6 +62,8 @@ ATTEMPT_OUTCOMES = (
     "dropped",
     "unknown",
 )
+
+INTAKE_PLACE_KEY_UNIQUE = "uq_intake_keys_place_key"
 
 
 def _in_list(values: tuple[str, ...]) -> str:
@@ -110,6 +114,9 @@ class OrderEvent(Base):
         nullable=False,
         server_default=text("now()"),
     )
+    applied: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
 
 
 class WorkItem(Base):
@@ -122,6 +129,7 @@ class WorkItem(Base):
         ),
         Index("ix_work_items_order_id", "order_id"),
         Index("ix_work_items_claim", "status", "next_attempt_at"),
+        Index("ix_work_items_lease", "status", "lease_until"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -185,7 +193,10 @@ class Attempt(Base):
 
 class IntakeKey(Base):
     __tablename__ = "intake_keys"
-    __table_args__ = (Index("ix_intake_keys_order_id", "order_id"),)
+    __table_args__ = (
+        Index("ix_intake_keys_order_id", "order_id"),
+        UniqueConstraint("place_key", name=INTAKE_PLACE_KEY_UNIQUE),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -193,7 +204,7 @@ class IntakeKey(Base):
         default=uuid.uuid4,
         server_default=text("gen_random_uuid()"),
     )
-    place_key: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    place_key: Mapped[str] = mapped_column(Text, nullable=False)
     body_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
     order_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),

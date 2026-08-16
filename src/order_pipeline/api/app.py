@@ -3,7 +3,6 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import FastAPI, Header, HTTPException
-from psycopg.errors import UniqueViolation
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
@@ -14,6 +13,7 @@ from order_pipeline.api.settings import APISettings
 from order_pipeline.intake import (
     FingerprintConflict,
     body_fingerprint,
+    is_place_key_unique_violation,
     place_order,
     replay_existing,
 )
@@ -80,7 +80,7 @@ def post_orders(body: PlaceOrderRequest, idempotency_key: PlaceKeyHeader) -> Ord
             detail="Idempotency-Key reused with a different body",
         ) from exc
     except IntegrityError as exc:
-        if not isinstance(exc.orig, UniqueViolation):
+        if not is_place_key_unique_violation(exc):
             raise
         with SessionLocal.begin() as session:
             try:

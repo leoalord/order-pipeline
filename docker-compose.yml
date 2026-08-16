@@ -1,6 +1,10 @@
 services:
   postgres:
     image: postgres:16
+    ports:
+      # Loopback-only, non-default host port: the direct-session tests need a
+      # DSN from the host, and 5432 is often already taken by a local Postgres.
+      - "127.0.0.1:55432:5432"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres

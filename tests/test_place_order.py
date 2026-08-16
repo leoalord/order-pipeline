@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +70,7 @@ def _post(
     *,
     cohort_id: str | None = None,
     extra_headers: dict[str, str] | None = None,
+    timeout: float = 5.0,
 ) -> httpx.Response:
     payload: dict[str, Any] = {"items": items}
     if cohort_id is not None:
@@ -79,7 +81,7 @@ def _post(
     else:
         headers.update(extra_headers)
     try:
-        return httpx.post(f"{API_URL}/orders", json=payload, headers=headers, timeout=5.0)
+        return httpx.post(f"{API_URL}/orders", json=payload, headers=headers, timeout=timeout)
     except httpx.RequestError as exc:
         pytest.fail(f"API is down: {exc}")
 
@@ -239,6 +241,26 @@ def test_timeline_a_retried_place_key_is_one_order() -> None:
         f"WHERE i.place_key = '{place_key}'"
     )
     assert linked == "1"
+
+
+def test_concurrent_same_key_is_one_order() -> None:
+    """N racers, one key: UniqueViolation recovery, one id, no leftover rows."""
+    place_key = f"test-concurrent-{uuid.uuid4()}"
+    workers = 12
+    before = _table_counts()
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_post, ["burrito"], place_key, timeout=15.0) for _ in range(workers)]
+        responses = [future.result() for future in futures]
+    failures = [response.text for response in responses if response.status_code != 201]
+    assert failures == []
+    ids = {response.json()["id"] for response in responses}
+    assert len(ids) == 1
+    after = _table_counts()
+    assert after["orders"] - before["orders"] == 1
+    assert after["order_events"] - before["order_events"] == 1
+    assert after["work_items"] - before["work_items"] == 1
+    assert after["intake_keys"] - before["intake_keys"] == 1
+    assert after["attempts"] - before["attempts"] == 0
 
 
 def test_get_missing_order_is_404() -> None:

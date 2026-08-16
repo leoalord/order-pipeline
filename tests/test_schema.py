@@ -161,6 +161,41 @@ def test_intake_keys_support_place_key_fingerprint_and_ttl() -> None:
     assert {"place_key", "body_fingerprint", "order_id", "created_at", "expires_at"} <= names
 
 
+def test_order_events_has_applied_flag() -> None:
+    row = _psql(
+        "SELECT column_name, udt_name, is_nullable, column_default "
+        "FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND table_name = 'order_events' "
+        "AND column_name = 'applied'"
+    )
+    name, udt, nullable, default = row.split("|")
+    assert name == "applied"
+    assert udt == "bool"
+    assert nullable == "NO"
+    assert "true" in default.lower()
+
+
+def test_work_items_lease_reclaim_index() -> None:
+    row = _psql(
+        "SELECT indexname, indexdef FROM pg_indexes "
+        "WHERE schemaname = 'public' AND tablename = 'work_items' "
+        "AND indexname = 'ix_work_items_lease'"
+    )
+    name, definition = row.split("|", 1)
+    assert name == "ix_work_items_lease"
+    assert "status" in definition
+    assert "lease_until" in definition
+
+
+def test_intake_place_key_unique_is_named() -> None:
+    name = _psql(
+        "SELECT conname FROM pg_constraint "
+        "WHERE conrelid = 'intake_keys'::regclass AND contype = 'u' "
+        "AND pg_get_constraintdef(oid) ILIKE '%place_key%'"
+    )
+    assert name == "uq_intake_keys_place_key"
+
+
 def test_single_alembic_version_applied() -> None:
     applied = _psql("SELECT version_num FROM alembic_version")
     assert applied == "001_full_schema"

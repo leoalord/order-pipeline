@@ -3,9 +3,9 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from order_pipeline import models as _models  # noqa: F401
 from order_pipeline.api.settings import APISettings
 from order_pipeline.db import Base
-from order_pipeline import models as _models  # noqa: F401
 
 config = context.config
 

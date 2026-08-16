@@ -8,16 +8,16 @@ The only business-schema revision. Later slices must not add another.
 Work type and attempt outcome are TEXT + CHECK, not native PG ENUMs.
 """
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "001_full_schema"
-down_revision: Union[str, Sequence[str], None] = None
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | Sequence[str] | None = None
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
@@ -62,6 +62,7 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
             nullable=False,
         ),
+        sa.Column("applied", sa.Boolean(), server_default=sa.text("true"), nullable=False),
         sa.ForeignKeyConstraint(["order_id"], ["orders.id"]),
         sa.PrimaryKeyConstraint("id"),
     )
@@ -103,6 +104,7 @@ def upgrade() -> None:
     )
     op.create_index("ix_work_items_order_id", "work_items", ["order_id"])
     op.create_index("ix_work_items_claim", "work_items", ["status", "next_attempt_at"])
+    op.create_index("ix_work_items_lease", "work_items", ["status", "lease_until"])
 
     op.create_table(
         "attempts",
@@ -152,7 +154,7 @@ def upgrade() -> None:
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["order_id"], ["orders.id"]),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("place_key"),
+        sa.UniqueConstraint("place_key", name="uq_intake_keys_place_key"),
     )
     op.create_index("ix_intake_keys_order_id", "intake_keys", ["order_id"])
 
@@ -162,6 +164,7 @@ def downgrade() -> None:
     op.drop_table("intake_keys")
     op.drop_index("ix_attempts_work_item_id", table_name="attempts")
     op.drop_table("attempts")
+    op.drop_index("ix_work_items_lease", table_name="work_items")
     op.drop_index("ix_work_items_claim", table_name="work_items")
     op.drop_index("ix_work_items_order_id", table_name="work_items")
     op.drop_table("work_items")

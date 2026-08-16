@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+from psycopg.errors import UniqueViolation
 from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
 
 from order_pipeline.api.schemas import PlaceOrderRequest
 from order_pipeline.intake import (
@@ -14,9 +17,10 @@ from order_pipeline.intake import (
     _new_accept_rows,
     body_fingerprint,
     confirm_idempotency_key,
+    is_place_key_unique_violation,
 )
 from order_pipeline.menu import MAX_CART_ITEMS, MENU_ITEM_IDS
-from order_pipeline.models import IntakeKey, Order, OrderEvent, WorkItem
+from order_pipeline.models import INTAKE_PLACE_KEY_UNIQUE, IntakeKey, Order, OrderEvent, WorkItem
 
 
 def test_menu_ids_match_config_cook_keys() -> None:
@@ -73,6 +77,7 @@ def test_new_accept_rows_always_include_confirm_work_item() -> None:
     assert order.accepted_at == now
     assert event.to_state == "placed"
     assert event.from_state is None
+    assert event.applied is True
     assert work_item.work_type == "confirm"
     assert work_item.status == "pending"
     assert work_item.idempotency_key == confirm_idempotency_key(order.id)
@@ -103,3 +108,22 @@ def test_valid_cart_and_optional_cohort_parse() -> None:
     cohort = uuid4()
     with_cohort = PlaceOrderRequest.model_validate({"items": ["burrito"], "cohort_id": str(cohort)})
     assert with_cohort.cohort_id == cohort
+
+
+class _NamedUniqueViolation(UniqueViolation):
+    def __init__(self, constraint_name: str | None) -> None:
+        super().__init__("duplicate key value violates unique constraint")
+        self._constraint_name = constraint_name
+
+    @property
+    def diag(self) -> SimpleNamespace:  # type: ignore[override]
+        return SimpleNamespace(constraint_name=self._constraint_name)
+
+
+def test_unique_violation_recovery_is_scoped_to_place_key() -> None:
+    place = IntegrityError("INSERT", {}, _NamedUniqueViolation(INTAKE_PLACE_KEY_UNIQUE))
+    other = IntegrityError("INSERT", {}, _NamedUniqueViolation("work_items_idempotency_key_key"))
+    not_unique = IntegrityError("INSERT", {}, RuntimeError("foreign key"))
+    assert is_place_key_unique_violation(place) is True
+    assert is_place_key_unique_violation(other) is False
+    assert is_place_key_unique_violation(not_unique) is False

@@ -9,10 +9,12 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+from psycopg.errors import UniqueViolation
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from order_pipeline.models import IntakeKey, Order, OrderEvent, WorkItem
+from order_pipeline.models import INTAKE_PLACE_KEY_UNIQUE, IntakeKey, Order, OrderEvent, WorkItem
 
 # Stable until POST /cohort/new exists (dinner_rush / task #16).
 DEFAULT_COHORT_ID = UUID("00000000-0000-4000-8000-000000000001")
@@ -22,6 +24,14 @@ CONFIRM_WORK_TYPE = "confirm"
 
 class FingerprintConflict(Exception):
     """Same place-key reused with a different cart/body (easy wrong-turn 6)."""
+
+
+def is_place_key_unique_violation(exc: IntegrityError) -> bool:
+    """True only for the pinned intake place-key unique; other uniques must propagate."""
+    orig = exc.orig
+    if not isinstance(orig, UniqueViolation):
+        return False
+    return orig.diag.constraint_name == INTAKE_PLACE_KEY_UNIQUE
 
 
 def confirm_idempotency_key(order_id: UUID) -> str:
@@ -65,6 +75,7 @@ def _new_accept_rows(
         actor="api",
         cause="place",
         timestamp=now,
+        applied=True,
     )
     work_item = WorkItem(
         order_id=order_id,
