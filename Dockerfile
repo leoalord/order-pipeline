@@ -9,11 +9,14 @@ COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 COPY alembic.ini ./
 COPY alembic ./alembic
+COPY docker-entrypoint.sh /docker-entrypoint.sh
 
-RUN uv sync --frozen --no-dev --no-editable
+RUN uv sync --frozen --no-dev --no-editable \
+    && chmod +x /docker-entrypoint.sh
 
 ENV PATH="/app/.venv/bin:$PATH"
 
 EXPOSE 8000
 
+ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["uvicorn", "order_pipeline.api.app:app", "--host", "0.0.0.0", "--port", "8000"]

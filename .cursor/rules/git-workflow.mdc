@@ -1,0 +1,14 @@
+---
+description: Require feature branches and pull requests; never commit or push to main
+alwaysApply: true
+---
+
+# Git workflow
+
+`main` is protected. All changes land through a pull request from a feature branch.
+
+- Never commit, push, merge, or amend on `main`.
+- Before making changes, create and check out a feature branch from up-to-date `origin/main` (`feat/…`, `fix/…`, `chore/…`).
+- If the working tree is already on `main` with local changes, move that work onto a feature branch before committing.
+- Push the feature branch and open a PR targeting `main`. Do not push to `main`.
+- One concern per branch/PR. Do not mix unrelated work.
