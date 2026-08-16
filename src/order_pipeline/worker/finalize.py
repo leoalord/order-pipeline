@@ -34,6 +34,30 @@ CAUSE_PERMANENT_4XX = "permanent_4xx"
 CAUSE_CONFIRM_DEADLINE = "confirm_deadline"
 
 
+def _park_if_budget_exhausted(
+    claimed: ClaimedWork,
+    settings: WorkerSettings,
+    result: HandlerResult,
+) -> HandlerResult | None:
+    """Count-bounded stop rule. Applies to failed *and* successful not-ready retries."""
+    budget = count_budget_for(claimed.work_type, settings)
+    if budget is None or not count_budget_exhausted(claimed.attempt_count, budget):
+        return None
+    reason = (
+        "poll_budget_exhausted"
+        if claimed.work_type in {"poll_cook", "poll_ride"}
+        else "retry_budget_exhausted"
+    )
+    return HandlerResult(
+        outcome=result.outcome,
+        disposition=WorkDisposition.PARK,
+        transition=result.transition,
+        result_payload=result.result_payload,
+        park_reason=reason,
+        park_next_action="redrive",
+    )
+
+
 def apply_policy(
     result: HandlerResult,
     claimed: ClaimedWork,
@@ -55,6 +79,10 @@ def apply_policy(
 
     if result.outcome == "ok":
         disposition = result.disposition or WorkDisposition.COMPLETE
+        if disposition is WorkDisposition.RETRY:
+            parked = _park_if_budget_exhausted(claimed, settings, result)
+            if parked is not None:
+                return parked
         return HandlerResult(
             outcome=result.outcome,
             disposition=disposition,
@@ -80,20 +108,9 @@ def apply_policy(
             result_payload=result.result_payload,
         )
 
-    budget = count_budget_for(claimed.work_type, settings)
-    if budget is not None and count_budget_exhausted(claimed.attempt_count, budget):
-        reason = (
-            "poll_budget_exhausted"
-            if claimed.work_type in {"poll_cook", "poll_ride"}
-            else "retry_budget_exhausted"
-        )
-        return HandlerResult(
-            outcome=result.outcome,
-            disposition=WorkDisposition.PARK,
-            result_payload=result.result_payload,
-            park_reason=reason,
-            park_next_action="redrive",
-        )
+    parked = _park_if_budget_exhausted(claimed, settings, result)
+    if parked is not None:
+        return parked
 
     return HandlerResult(
         outcome=result.outcome,
@@ -209,21 +226,23 @@ def finalize_claim(
     now: datetime,
     rng: random.Random,
 ) -> None:
-    """Finalize the attempt opened at claim. Never rewrite a different NULL row."""
+    """Finalize the attempt opened at claim. Never rewrite a stolen claimant's NULL row."""
     policy = apply_policy(result, claimed, settings, now)
     attempt = session.get(Attempt, claimed.attempt_id)
     if attempt is None:
         raise RuntimeError(f"attempt {claimed.attempt_id} missing at finalize")
     if attempt.outcome is not None:
         return
-    attempt.outcome = policy.outcome
-    attempt.ended_at = now
 
     item = session.get(WorkItem, claimed.work_item_id)
     if item is None:
         return
     if item.lease_owner != claimed.lease_owner:
+        # Reclaim gap: leave this attempt NULL. Do not stamp a late outcome.
         return
+
+    attempt.outcome = policy.outcome
+    attempt.ended_at = now
 
     applied = True
     if policy.transition is not None:

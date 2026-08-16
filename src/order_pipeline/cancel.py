@@ -16,7 +16,6 @@ from order_pipeline.worker.finalize import CAUSE_INVALID
 CAUSE_CANCEL = "cancel"
 ACTOR_API = "api"
 LEGAL_FROM = ("placed", "confirmed")
-OPEN_WORK_STATUSES = ("pending", "leased")
 
 
 class OrderNotFound(Exception):
@@ -38,16 +37,19 @@ class CancelResult:
 def _cancel_open_work(session: Session, order_id: UUID) -> None:
     """Stop quiet pre-pivot cancel from leaving claimable confirm/poll work.
 
-    Not void_ticket: in-flight kitchen HTTP may still finish; worker supersession
-    must not count that as invalid.
+    Pending work is cancelled and unleased. Leased work is marked cancelled but
+    keeps lease_owner so the in-flight worker can finalize as supersession
+    (0-row UPDATE, not invalid). status=cancelled already blocks reclaim.
     """
     session.execute(
         update(WorkItem)
-        .where(
-            WorkItem.order_id == order_id,
-            WorkItem.status.in_(OPEN_WORK_STATUSES),
-        )
+        .where(WorkItem.order_id == order_id, WorkItem.status == "pending")
         .values(status="cancelled", lease_owner=None, lease_until=None)
+    )
+    session.execute(
+        update(WorkItem)
+        .where(WorkItem.order_id == order_id, WorkItem.status == "leased")
+        .values(status="cancelled")
     )
 
 

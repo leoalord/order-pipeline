@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from order_pipeline.cancel import CancelOutcome, cancel_order
 from order_pipeline.intake import place_order
 from order_pipeline.models import Attempt, Order, OrderEvent, WorkItem
 from order_pipeline.worker.claim import claim_next
@@ -238,10 +239,12 @@ def test_cancelled_zero_rows_is_supersession_not_invalid(
         assert claimed is not None
 
     with session_factory.begin() as session:
-        order = session.get(Order, order_id)
-        assert order is not None
-        order.state = "cancelled"
-        order.version += 1
+        cancelled = cancel_order(session, order_id, now=now)
+        assert cancelled.outcome is CancelOutcome.APPLIED
+        item = session.get(WorkItem, item_id)
+        assert item is not None
+        assert item.status == "cancelled"
+        assert item.lease_owner == "worker-a"
 
     result = HandlerResult(
         outcome="ok",
@@ -266,15 +269,93 @@ def test_cancelled_zero_rows_is_supersession_not_invalid(
     with session_factory() as session:
         order = session.get(Order, order_id)
         item = session.get(WorkItem, item_id)
+        attempt = session.get(Attempt, claimed.attempt_id)
         assert order is not None
         assert item is not None
+        assert attempt is not None
         assert order.state == "cancelled"
         assert item.status == "cancelled"
+        assert item.lease_owner is None
+        assert attempt.outcome == "ok"
         evidence = session.scalars(
             select(OrderEvent).where(OrderEvent.order_id == order_id, OrderEvent.applied.is_(False))
         ).all()
         assert len(evidence) == 1
         assert evidence[0].cause == CAUSE_SUPERSEDED
+
+
+def test_stale_finalize_after_reclaim_leaves_null_attempt(
+    session_factory: sessionmaker[Session],
+) -> None:
+    order_id, item_id, stored_key = _seed_confirm(session_factory)
+    now = datetime.now(UTC)
+    settings = _settings()
+    confirm_ok = HandlerResult(
+        outcome="ok",
+        transition=GuardedTransition(
+            expected_state="placed",
+            to_state="confirmed",
+            cause="confirm",
+        ),
+    )
+
+    with session_factory.begin() as session:
+        claimed_a = _claim(session, item_id, now=now, worker_id="worker-a")
+        assert claimed_a is not None
+        first_attempt_id = claimed_a.attempt_id
+
+    later = now + timedelta(seconds=1)
+    with session_factory.begin() as session:
+        item = session.get(WorkItem, item_id)
+        assert item is not None
+        item.lease_until = now - timedelta(seconds=1)
+        claimed_b = _claim(session, item_id, now=later, worker_id="worker-b")
+        assert claimed_b is not None
+        second_attempt_id = claimed_b.attempt_id
+        assert claimed_b.idempotency_key == stored_key
+        assert second_attempt_id != first_attempt_id
+
+    with session_factory.begin() as session:
+        finalize_claim(
+            session,
+            claimed_a,
+            confirm_ok,
+            settings=settings,
+            counters=WorkerCounters(),
+            now=later,
+            rng=random.Random(0),
+        )
+
+    with session_factory.begin() as session:
+        finalize_claim(
+            session,
+            claimed_b,
+            confirm_ok,
+            settings=settings,
+            counters=WorkerCounters(),
+            now=later,
+            rng=random.Random(1),
+        )
+
+    with session_factory() as session:
+        first = session.get(Attempt, first_attempt_id)
+        second = session.get(Attempt, second_attempt_id)
+        order = session.get(Order, order_id)
+        assert first is not None
+        assert second is not None
+        assert order is not None
+        assert first.outcome is None
+        assert first.ended_at is None
+        assert second.outcome == "ok"
+        assert order.state == "confirmed"
+        confirmed = session.scalars(
+            select(OrderEvent).where(
+                OrderEvent.order_id == order_id,
+                OrderEvent.to_state == "confirmed",
+                OrderEvent.applied.is_(True),
+            )
+        ).all()
+        assert len(confirmed) == 1
 
 
 def test_business_4xx_fails_order_no_retry(session_factory: sessionmaker[Session]) -> None:

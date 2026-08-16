@@ -20,7 +20,13 @@ from order_pipeline.worker.claim import claim_next
 from order_pipeline.worker.counters import WorkerCounters
 from order_pipeline.worker.finalize import CAUSE_CONFIRM_DEADLINE, finalize_claim
 from order_pipeline.worker.kitchen import KitchenHandlers, parse_ready_at, poll_cook_idempotency_key
-from order_pipeline.worker.plugin import ClaimedWork, HandlerResult, WorkHandler
+from order_pipeline.worker.plugin import (
+    ClaimedWork,
+    GuardedTransition,
+    HandlerResult,
+    WorkDisposition,
+    WorkHandler,
+)
 from order_pipeline.worker.settings import WorkerSettings
 
 TTL_HOURS = 48
@@ -205,8 +211,12 @@ def test_confirm_deadline_compare_fails_the_order(
         assert event.to_state == "failed"
 
 
-def test_poll_exhaustion_parks_the_item(session_factory: sessionmaker[Session]) -> None:
-    now = datetime.now(UTC)
+def _seed_poll_at_budget(
+    session_factory: sessionmaker[Session],
+    *,
+    now: datetime,
+    worker_id: str,
+) -> tuple[uuid.UUID, uuid.UUID, ClaimedWork]:
     with session_factory.begin() as session:
         order = place_order(
             session,
@@ -236,12 +246,17 @@ def test_poll_exhaustion_parks_the_item(session_factory: sessionmaker[Session]) 
         )
         session.add(poll)
         session.flush()
-        claimed = _claim(
-            session, poll.id, now=now, worker_id="kitchen-park", work_types=("poll_cook",)
-        )
+        claimed = _claim(session, poll.id, now=now, worker_id=worker_id, work_types=("poll_cook",))
         assert claimed is not None
         assert claimed.attempt_count == 30
-        order_id, item_id = order.id, poll.id
+        return order.id, poll.id, claimed
+
+
+def test_poll_exhaustion_parks_the_item(session_factory: sessionmaker[Session]) -> None:
+    now = datetime.now(UTC)
+    order_id, item_id, claimed = _seed_poll_at_budget(
+        session_factory, now=now, worker_id="kitchen-park"
+    )
 
     with session_factory.begin() as session:
         finalize_claim(
@@ -266,3 +281,84 @@ def test_poll_exhaustion_parks_the_item(session_factory: sessionmaker[Session]) 
         assert item.park_next_action == "redrive"
         assert item.lease_owner is None
         assert item.lease_until is None
+
+
+def test_poll_exhaustion_parks_on_ok_not_ready(
+    session_factory: sessionmaker[Session],
+) -> None:
+    now = datetime.now(UTC)
+    order_id, item_id, claimed = _seed_poll_at_budget(
+        session_factory, now=now, worker_id="kitchen-park-ok"
+    )
+
+    with session_factory.begin() as session:
+        finalize_claim(
+            session,
+            claimed,
+            HandlerResult(
+                outcome="ok",
+                disposition=WorkDisposition.RETRY,
+                next_attempt_at=now + timedelta(seconds=3),
+            ),
+            settings=_settings(),
+            counters=WorkerCounters(),
+            now=now,
+            rng=random.Random(0),
+        )
+
+    with session_factory() as session:
+        parked_order = session.get(Order, order_id)
+        item = session.get(WorkItem, item_id)
+        assert parked_order is not None
+        assert item is not None
+        assert parked_order.state == "confirmed"
+        assert item.status == "parked"
+        assert item.park_reason == "poll_budget_exhausted"
+        assert item.park_next_action == "redrive"
+        assert item.lease_owner is None
+
+
+def test_poll_exhaustion_keeps_cooking_started_then_parks(
+    session_factory: sessionmaker[Session],
+) -> None:
+    now = datetime.now(UTC)
+    order_id, item_id, claimed = _seed_poll_at_budget(
+        session_factory, now=now, worker_id="kitchen-park-cook"
+    )
+
+    with session_factory.begin() as session:
+        finalize_claim(
+            session,
+            claimed,
+            HandlerResult(
+                outcome="ok",
+                disposition=WorkDisposition.RETRY,
+                transition=GuardedTransition(
+                    expected_state="confirmed",
+                    to_state="being_prepared",
+                    cause="cooking_started",
+                ),
+                next_attempt_at=now + timedelta(seconds=3),
+            ),
+            settings=_settings(),
+            counters=WorkerCounters(),
+            now=now,
+            rng=random.Random(0),
+        )
+
+    with session_factory() as session:
+        parked_order = session.get(Order, order_id)
+        item = session.get(WorkItem, item_id)
+        assert parked_order is not None
+        assert item is not None
+        assert parked_order.state == "being_prepared"
+        assert item.status == "parked"
+        assert item.park_reason == "poll_budget_exhausted"
+        event = session.scalars(
+            select(OrderEvent).where(
+                OrderEvent.order_id == order_id,
+                OrderEvent.cause == "cooking_started",
+                OrderEvent.applied.is_(True),
+            )
+        ).one()
+        assert event.to_state == "being_prepared"
