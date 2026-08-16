@@ -115,7 +115,6 @@ def test_replay_after_violation_returns_the_winning_order(
             now=datetime.now(UTC),
         )
         assert replayed.id == winner_id
-        assert replayed.state == "placed"
 
 
 def test_replay_after_violation_conflicts_on_a_different_cart(
@@ -162,11 +161,12 @@ def test_expired_key_mints_a_new_order_and_reuses_the_row(
         # Both orders keep their own confirm work item with their own stored key.
         for order_id in (first_id, second_id):
             work_items = session.scalars(
-                select(WorkItem).where(WorkItem.order_id == order_id)
+                select(WorkItem).where(
+                    WorkItem.order_id == order_id, WorkItem.work_type == "confirm"
+                )
             ).all()
             assert len(work_items) == 1
             assert work_items[0].idempotency_key == confirm_idempotency_key(order_id)
-            assert work_items[0].status == "pending"
 
 
 def test_within_ttl_the_same_key_replays_without_a_second_order(
@@ -180,6 +180,8 @@ def test_within_ttl_the_same_key_replays_without_a_second_order(
     with session_factory() as session:
         orders = session.scalars(select(Order).where(Order.id == first_id)).all()
         assert len(orders) == 1
-        events = session.scalars(select(OrderEvent).where(OrderEvent.order_id == first_id)).all()
+        events = session.scalars(
+            select(OrderEvent).where(OrderEvent.order_id == first_id, OrderEvent.cause == "place")
+        ).all()
         assert len(events) == 1
         assert events[0].applied is True

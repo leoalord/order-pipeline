@@ -11,6 +11,7 @@ requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.14",
     "fastapi>=0.115",
+    "httpx>=0.28",
     "pydantic-settings>=2.7",
     "psycopg[binary]>=3.2",
     "sqlalchemy>=2.0.36",
@@ -19,14 +20,14 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "httpx>=0.28",
     "mypy>=1.13",
     "pytest>=8.3",
     "ruff>=0.8",
 ]
 
-# Later slices add console scripts for worker / restaurant-sim / courier-sim
-# against this same package (one Dockerfile).
+[project.scripts]
+restaurant-sim = "order_pipeline.restaurant.__main__:main"
+worker = "order_pipeline.worker.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

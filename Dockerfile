@@ -16,7 +16,7 @@ RUN uv sync --frozen --no-dev --no-editable \
 
 ENV PATH="/app/.venv/bin:$PATH"
 
-EXPOSE 8000
+EXPOSE 8000 8081 8083
 
 ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["uvicorn", "order_pipeline.api.app:app", "--host", "0.0.0.0", "--port", "8000"]

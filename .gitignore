@@ -11,3 +11,6 @@ build/
 .coverage
 htmlcov/
 *.log
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

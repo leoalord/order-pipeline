@@ -1,1 +1,1 @@
-"""Order pipeline package. Worker and sim entrypoints land in later slices."""
+"""Order pipeline package. Worker and restaurant sim are extra entrypoints on the same image."""

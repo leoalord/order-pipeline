@@ -39,15 +39,67 @@ services:
       retries: 20
       start_period: 5s
 
+  restaurant:
+    build: .
+    command: ["restaurant-sim"]
+    ports:
+      - "8081:8081"
+    environment:
+      SKIP_MIGRATIONS: "1"
+      RSIM_LEDGER_PATH: /var/lib/restaurant/ledger.sqlite
+    volumes:
+      - restaurant_ledger:/var/lib/restaurant
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health')",
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  worker:
+    build: .
+    command: ["worker"]
+    ports:
+      - "8083:8083"
+    environment:
+      SKIP_MIGRATIONS: "1"
+      WORKER_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/order_pipeline
+      WORKER_RESTAURANT_BASE_URL: http://restaurant:8081
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+      restaurant:
+        condition: service_healthy
+    restart: "no"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8083/health')",
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
   # Reserved host ports (later slices — do not bind them here):
   #   dashboard  5173
-  #   restaurant 8081
   #   courier    8082
   #   loadgen    8090
   #
-  # Workers, when they appear:
-  #   restart: "no"   — restart: always deletes scenario 3's gap
-  #   deploy.replicas: 2 so `docker compose ps -q worker` returns two ids
+  # Second worker replica waits for a later slice so `docker compose ps -q worker`
+  # can return two ids. restart: "no" — restart: always deletes scenario 3's gap.
 
 volumes:
   postgres_data:
+  restaurant_ledger:
