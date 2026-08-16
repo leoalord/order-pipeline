@@ -1,0 +1,49 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: order_pipeline
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d order_pipeline"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      API_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/order_pipeline
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')",
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  # Reserved host ports (later slices — do not bind them here):
+  #   dashboard  5173
+  #   restaurant 8081
+  #   courier    8082
+  #   loadgen    8090
+  #
+  # Workers, when they appear:
+  #   restart: "no"   — restart: always deletes scenario 3's gap
+  #   deploy.replicas: 2 so `docker compose ps -q worker` returns two ids
+
+volumes:
+  postgres_data:

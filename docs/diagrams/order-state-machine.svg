@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="970" height="270" viewBox="0 0 970 270" font-family="-apple-system, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#8a8a85" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="970" height="270" rx="10" fill="#ffffff" stroke="#e6e4dd"/>
+
+  <text x="14" y="19" font-size="11" fill="#8a8a85">pre-pivot (cancellable)</text>
+  <rect x="10" y="26" width="302" height="68" rx="10" fill="none" stroke="#b4b2a9" stroke-dasharray="5 4"/>
+
+  <g font-size="13" font-weight="600" text-anchor="middle">
+    <rect x="20" y="36" width="120" height="48" rx="8" fill="#E6F1FB" stroke="#378ADD"/>
+    <text x="80" y="64" fill="#0C447C">placed</text>
+
+    <rect x="182" y="36" width="120" height="48" rx="8" fill="#E6F1FB" stroke="#378ADD"/>
+    <text x="242" y="64" fill="#0C447C">confirmed</text>
+
+    <rect x="344" y="36" width="120" height="48" rx="8" fill="#E6F1FB" stroke="#378ADD"/>
+    <text x="404" y="64" fill="#0C447C" font-size="12">being prepared</text>
+
+    <rect x="506" y="36" width="120" height="48" rx="8" fill="#E6F1FB" stroke="#378ADD"/>
+    <text x="566" y="64" fill="#0C447C">ready</text>
+
+    <rect x="668" y="36" width="120" height="48" rx="8" fill="#E6F1FB" stroke="#378ADD"/>
+    <text x="728" y="64" fill="#0C447C" font-size="12">out for delivery</text>
+
+    <rect x="830" y="36" width="120" height="48" rx="8" fill="#EAF3DE" stroke="#639922" stroke-width="1.5"/>
+    <text x="890" y="64" fill="#27500A">delivered</text>
+
+    <rect x="20" y="200" width="120" height="44" rx="8" fill="#F1EFE8" stroke="#888780" stroke-width="1.5"/>
+    <text x="80" y="226" fill="#444441">cancelled</text>
+
+    <rect x="182" y="200" width="120" height="44" rx="8" fill="#FCEBEB" stroke="#E24B4A" stroke-width="1.5"/>
+    <text x="242" y="226" fill="#791F1F">failed</text>
+  </g>
+
+  <g stroke="#8a8a85" stroke-width="1.4" fill="none">
+    <line x1="140" y1="60" x2="176" y2="60" marker-end="url(#arr)"/>
+    <line x1="302" y1="60" x2="338" y2="60" marker-end="url(#arr)"/>
+    <line x1="464" y1="60" x2="500" y2="60" marker-end="url(#arr)"/>
+    <line x1="626" y1="60" x2="662" y2="60" marker-end="url(#arr)"/>
+    <line x1="788" y1="60" x2="824" y2="60" marker-end="url(#arr)"/>
+
+    <line x1="80" y1="94" x2="80" y2="194" marker-end="url(#arr)"/>
+    <line x1="242" y1="94" x2="242" y2="194" marker-end="url(#arr)"/>
+  </g>
+
+  <g font-size="11" fill="#6b6a65">
+    <text x="88" y="144">cancel</text>
+    <text x="250" y="144">reject / deadline</text>
+    <text x="380" y="226">Any stage's work can park for operator redrive — the order's state never changes.</text>
+  </g>
+</svg>
