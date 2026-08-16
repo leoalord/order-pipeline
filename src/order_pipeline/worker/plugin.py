@@ -1,4 +1,4 @@
-"""Work-type plugin types. Kitchen handlers register at boot; courier later."""
+"""Work-type plugin types. Kitchen and courier handlers register at boot."""
 
 from __future__ import annotations
 

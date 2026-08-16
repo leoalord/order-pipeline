@@ -8,10 +8,12 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
-from order_pipeline.api.schemas import OrderResponse, PlaceOrderRequest
+from order_pipeline.api.schemas import OrderResponse, PlaceOrderRequest, SnapshotResponse
 from order_pipeline.api.settings import APISettings
+from order_pipeline.api.snapshot import build_snapshot, fetch_ledger_counts
 from order_pipeline.cancel import CancelOutcome, OrderNotFound, cancel_order
 from order_pipeline.intake import (
+    DEFAULT_COHORT_ID,
     FingerprintConflict,
     body_fingerprint,
     is_place_key_unique_violation,
@@ -97,6 +99,30 @@ def post_orders(body: PlaceOrderRequest, idempotency_key: PlaceKeyHeader) -> Ord
                     status_code=409,
                     detail="Idempotency-Key reused with a different body",
                 ) from conflict
+
+
+@app.get("/snapshot")
+def get_snapshot(
+    cohort_id: UUID | None = None,
+    order_id: UUID | None = None,
+) -> SnapshotResponse:
+    """Named metrics GET. Every query filters cohort_id. Optional order_id is the paste-an-ID trace.
+
+    Duplicate effects are read from sim GET /admin/ledger (HTTP with no DB
+    session open — the API still never calls sims on place/cancel).
+    """
+    cohort = cohort_id if cohort_id is not None else DEFAULT_COHORT_ID
+    now = datetime.now(UTC)
+    restaurant_counts = fetch_ledger_counts(settings.restaurant_admin_url)
+    courier_counts = fetch_ledger_counts(settings.courier_admin_url)
+    with SessionLocal() as session:
+        return build_snapshot(
+            session,
+            cohort_id=cohort,
+            now=now,
+            ledger_counts=(restaurant_counts, courier_counts),
+            order_id=order_id,
+        )
 
 
 @app.get("/orders/{order_id}")

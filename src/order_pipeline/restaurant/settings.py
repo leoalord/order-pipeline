@@ -28,9 +28,8 @@ class RSIMSettings(BaseSettings):
     cook_s: CookTimes = Field(default_factory=CookTimes)
     extra_item_s: float = 5.0
     rail_fuse: int = 80
-    # Config table lists 3/2; this slice keeps 0 so later kitchen tests don't flake.
-    flaky_5xx_pct: float = 0.0
-    flaky_drop_pct: float = 0.0
+    flaky_5xx_pct: float = 3.0
+    flaky_drop_pct: float = 2.0
     sim_timeout_s: float = 2.0
     ledger_path: Path = Path("restaurant-ledger.sqlite")
     host: str = "0.0.0.0"

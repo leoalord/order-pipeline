@@ -1,4 +1,4 @@
-"""Per-dependency slot caps. rsim is live; csim is a no-op until dispatch_and_deliver."""
+"""Per-dependency slot caps. Both rsim and csim are live (8 / 8 within task capacity 24)."""
 
 from __future__ import annotations
 
@@ -12,8 +12,7 @@ from order_pipeline.worker.settings import WorkerSettings
 class DepCaps:
     def __init__(self, settings: WorkerSettings) -> None:
         self._rsim = asyncio.Semaphore(settings.dep_cap_rsim)
-        # Stored so Settings is complete; not acquired until dispatch_and_deliver.
-        self.dep_cap_csim = settings.dep_cap_csim
+        self._csim = asyncio.Semaphore(settings.dep_cap_csim)
 
     @asynccontextmanager
     async def rsim(self) -> AsyncIterator[None]:
@@ -22,4 +21,5 @@ class DepCaps:
 
     @asynccontextmanager
     async def csim(self) -> AsyncIterator[None]:
-        yield
+        async with self._csim:
+            yield

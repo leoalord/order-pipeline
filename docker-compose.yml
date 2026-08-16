@@ -23,6 +23,8 @@ services:
       - "8000:8000"
     environment:
       API_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/order_pipeline
+      API_RESTAURANT_ADMIN_URL: http://restaurant:8081
+      API_COURIER_ADMIN_URL: http://courier:8082
     depends_on:
       postgres:
         condition: service_healthy
@@ -62,6 +64,29 @@ services:
       retries: 20
       start_period: 5s
 
+  courier:
+    build: .
+    command: ["courier-sim"]
+    ports:
+      - "8082:8082"
+    environment:
+      SKIP_MIGRATIONS: "1"
+      CSIM_LEDGER_PATH: /var/lib/courier/ledger.sqlite
+    volumes:
+      - courier_ledger:/var/lib/courier
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8082/health')",
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
   worker:
     build: .
     command: ["worker"]
@@ -71,12 +96,15 @@ services:
       SKIP_MIGRATIONS: "1"
       WORKER_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/order_pipeline
       WORKER_RESTAURANT_BASE_URL: http://restaurant:8081
+      WORKER_COURIER_BASE_URL: http://courier:8082
     depends_on:
       postgres:
         condition: service_healthy
       api:
         condition: service_healthy
       restaurant:
+        condition: service_healthy
+      courier:
         condition: service_healthy
     restart: "no"
     healthcheck:
@@ -92,9 +120,39 @@ services:
       retries: 20
       start_period: 5s
 
+  dashboard:
+    build: ./dashboard
+    ports:
+      - "5173:5173"
+    environment:
+      # Vite *server* proxy wiring — not VITE_ client knobs. The browser talks
+      # same-origin `/snapshot` `/loadgen` `/rsim` `/csim`. Loadgen is reserved
+      # for dinner_rush; do not add that container here.
+      API_PROXY_TARGET: http://api:8000
+      LOADGEN_PROXY_TARGET: http://loadgen:8090
+      RSIM_PROXY_TARGET: http://restaurant:8081
+      CSIM_PROXY_TARGET: http://courier:8082
+    depends_on:
+      api:
+        condition: service_healthy
+      restaurant:
+        condition: service_healthy
+      courier:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:5173/').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
   # Reserved host ports (later slices — do not bind them here):
-  #   dashboard  5173
-  #   courier    8082
   #   loadgen    8090
   #
   # Second worker replica waits for a later slice so `docker compose ps -q worker`
@@ -103,3 +161,4 @@ services:
 volumes:
   postgres_data:
   restaurant_ledger:
+  courier_ledger:

@@ -34,5 +34,6 @@ def test_compose_worker_is_one_replica_restart_no() -> None:
     assert "SKIP_MIGRATIONS" in COMPOSE
     assert "WORKER_DATABASE_URL" in COMPOSE
     assert "WORKER_RESTAURANT_BASE_URL: http://restaurant:8081" in COMPOSE
+    assert "WORKER_COURIER_BASE_URL: http://courier:8082" in COMPOSE
     assert "replicas:" not in COMPOSE
     assert "8083/health" in COMPOSE

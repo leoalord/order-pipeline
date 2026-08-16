@@ -21,6 +21,7 @@ def build_app(
     settings: RSIMSettings,
     *,
     now_fn: Callable[[], datetime] | None = None,
+    blackout_hang_s: float | None = None,
 ) -> FastAPI:
     cook_s = settings.cook_s.as_map()
     extra_item_s = settings.extra_item_s
@@ -30,12 +31,15 @@ def build_app(
 
     core = SimCore(
         ledger=EffectLedger(settings.ledger_path),
-        faults=FaultState(),
+        faults=FaultState(now_fn=now_fn),
         quote=quote,
         status_at=kitchen_status,
         flaky_5xx_pct=settings.flaky_5xx_pct,
         flaky_drop_pct=settings.flaky_drop_pct,
         now_fn=now_fn,
+        blackout_hang_s=(
+            settings.sim_timeout_s + 0.5 if blackout_hang_s is None else blackout_hang_s
+        ),
     )
     return create_sim_app(title="Restaurant sim", core=core)
 

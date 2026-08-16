@@ -8,6 +8,7 @@ import random
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -25,6 +26,7 @@ from order_pipeline.worker.finalize import (
     CAUSE_SUPERSEDED,
     finalize_claim,
 )
+from order_pipeline.worker.http import courier_base_url
 from order_pipeline.worker.plugin import (
     ClaimedWork,
     GuardedTransition,
@@ -51,11 +53,12 @@ LEASE_LIFECYCLE_CAUSES = frozenset(
 )
 
 
-def _settings(*, dep_cap_rsim: int = 8) -> WorkerSettings:
+def _settings(*, dep_cap_rsim: int = 8, dep_cap_csim: int = 8) -> WorkerSettings:
     return WorkerSettings(
         database_url=TEST_DATABASE_URL,
         restaurant_base_url="http://restaurant:8081",
         dep_cap_rsim=dep_cap_rsim,
+        dep_cap_csim=dep_cap_csim,
     )
 
 
@@ -464,6 +467,15 @@ def test_rsim_semaphore_respects_dep_cap() -> None:
         await asyncio.gather(*[one() for _ in range(6)])
         assert max_seen == 2
 
+    asyncio.run(_run())
+
+
+def test_csim_semaphore_respects_dep_cap_only() -> None:
+    async def _run() -> None:
+        settings = _settings(dep_cap_rsim=8, dep_cap_csim=2)
+        caps = DepCaps(settings)
+        lock = asyncio.Lock()
+
         csim_current = 0
         csim_max = 0
 
@@ -473,11 +485,36 @@ def test_rsim_semaphore_respects_dep_cap() -> None:
                 async with lock:
                     csim_current += 1
                     csim_max = max(csim_max, csim_current)
-                await asyncio.sleep(0.02)
+                await asyncio.sleep(0.05)
                 async with lock:
                     csim_current -= 1
 
-        await asyncio.gather(*[csim_one() for _ in range(6)])
-        assert csim_max == 6
+        rsim_current = 0
+        rsim_max = 0
+
+        async def rsim_one() -> None:
+            nonlocal rsim_current, rsim_max
+            async with caps.rsim():
+                async with lock:
+                    rsim_current += 1
+                    rsim_max = max(rsim_max, rsim_current)
+                await asyncio.sleep(0.05)
+                async with lock:
+                    rsim_current -= 1
+
+        await asyncio.gather(
+            *[csim_one() for _ in range(6)],
+            *[rsim_one() for _ in range(6)],
+        )
+        assert csim_max == 2
+        assert rsim_max == 6
 
     asyncio.run(_run())
+
+
+def test_courier_base_url_is_compose_wiring(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("WORKER_COURIER_BASE_URL", raising=False)
+    assert courier_base_url() == "http://courier:8082"
+    monkeypatch.setenv("WORKER_COURIER_BASE_URL", "http://localhost:8082")
+    assert courier_base_url() == "http://localhost:8082"
+    assert courier_base_url(override="http://csim:8082") == "http://csim:8082"

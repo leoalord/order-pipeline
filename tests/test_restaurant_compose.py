@@ -10,6 +10,8 @@ from pathlib import Path
 import httpx
 import pytest
 
+from tests.sim_admin import mix_off
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RSIM_URL = "http://localhost:8081"
 
@@ -57,6 +59,7 @@ def test_restaurant_health_and_ready() -> None:
 
 
 def test_replay_same_key_is_one_ledger_row_on_compose() -> None:
+    mix_off(RSIM_URL)
     key = f"compose-replay-{uuid.uuid4()}"
     headers = {"Idempotency-Key": key, "Content-Type": "application/json"}
     first = _rsim("POST", "/accept", json={"items": ["burrito"]}, headers=headers)
@@ -72,22 +75,25 @@ def test_replay_same_key_is_one_ledger_row_on_compose() -> None:
 
 
 def test_faults_clear_shows_mix_off() -> None:
+    mix_off(RSIM_URL)
     armed = _rsim("POST", "/admin/faults", json={"mode": "5xx_before"})
     assert armed.status_code == 200, armed.text
     assert armed.json()["mode"] == "5xx_before"
-    cleared = _rsim("POST", "/admin/faults", json={"mode": "clear"})
+    cleared = _rsim("POST", "/admin/faults", json={"mode": "clear", "mix": "off"})
     assert cleared.status_code == 200, cleared.text
     body = cleared.json()
     assert body["mode"] == "off"
     assert body["mix"] == "off"
     assert body["flaky_5xx_pct"] == 0.0
     assert body["flaky_drop_pct"] == 0.0
+    assert body["blackout_remaining_s"] == 0
     fetched = _rsim("GET", "/admin/faults")
     assert fetched.json()["mix"] == "off"
     assert fetched.json()["mode"] == "off"
 
 
 def test_ledger_survives_compose_restart() -> None:
+    mix_off(RSIM_URL)
     key = f"compose-restart-{uuid.uuid4()}"
     headers = {"Idempotency-Key": key, "Content-Type": "application/json"}
     accepted = _rsim("POST", "/accept", json={"items": ["taco"]}, headers=headers)
@@ -117,6 +123,7 @@ def test_ledger_survives_compose_restart() -> None:
         detail = (wait.stderr or wait.stdout).strip() or "no output"
         pytest.fail(f"docker compose up --wait restaurant failed: {detail}")
     _wait_healthy()
+    mix_off(RSIM_URL)
 
     after = _rsim("GET", "/admin/ledger")
     assert after.status_code == 200, after.text

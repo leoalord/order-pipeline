@@ -1,0 +1,37 @@
+"""Compose helpers: POST mix off so happy-path walks stay deterministic."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import httpx
+import pytest
+
+RSIM_URL = "http://localhost:8081"
+CSIM_URL = "http://localhost:8082"
+
+
+def post_sim_faults(base_url: str, payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        response = httpx.post(
+            f"{base_url}/admin/faults",
+            json=payload,
+            timeout=5.0,
+        )
+    except httpx.RequestError as exc:
+        pytest.fail(f"sim admin failed at {base_url}: {exc}")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert isinstance(body, dict)
+    return body
+
+
+def mix_off(*base_urls: str) -> None:
+    targets = base_urls or (RSIM_URL, CSIM_URL)
+    for url in targets:
+        body = post_sim_faults(url, {"mode": "clear", "mix": "off"})
+        assert body["mode"] == "off", body
+        assert body["mix"] == "off", body
+        assert body["flaky_5xx_pct"] == 0.0, body
+        assert body["flaky_drop_pct"] == 0.0, body
+        assert body["blackout_remaining_s"] == 0, body

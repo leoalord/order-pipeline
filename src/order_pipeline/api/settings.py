@@ -12,6 +12,9 @@ class APISettings(BaseSettings):
     database_url: str
     accept_concurrency: int = 32
     place_key_ttl_h: int = 48
+    # Compose wiring so GET /snapshot can read sim GET /admin/ledger (not Postgres).
+    restaurant_admin_url: str = "http://restaurant:8081"
+    courier_admin_url: str = "http://courier:8082"
 
     @model_validator(mode="after")
     def enforce_design_constraints(self) -> Self:

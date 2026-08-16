@@ -1,5 +1,7 @@
 .venv/
 .claude/
+dashboard/node_modules/
+dashboard/dist/
 __pycache__/
 *.py[cod]
 *.egg-info/
