@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 from order_pipeline.api.schemas import OrderResponse, PlaceOrderRequest
 from order_pipeline.api.settings import APISettings
+from order_pipeline.cancel import CancelOutcome, OrderNotFound, cancel_order
 from order_pipeline.intake import (
     FingerprintConflict,
     body_fingerprint,
@@ -105,3 +106,20 @@ def get_order(order_id: UUID) -> OrderResponse:
         if order is None:
             raise HTTPException(status_code=404, detail="order not found")
         return _order_response(order)
+
+
+@app.post("/orders/{order_id}/cancel")
+def post_cancel(order_id: UUID) -> OrderResponse:
+    try:
+        with SessionLocal.begin() as session:
+            result = cancel_order(session, order_id)
+            order = result.order
+            outcome = result.outcome
+    except OrderNotFound as exc:
+        raise HTTPException(status_code=404, detail="order not found") from exc
+    if outcome is CancelOutcome.REJECTED:
+        raise HTTPException(
+            status_code=409,
+            detail="cancel is not legal after being prepared",
+        )
+    return _order_response(order)

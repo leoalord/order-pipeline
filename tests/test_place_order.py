@@ -46,22 +46,11 @@ def _psql(sql: str) -> str:
     return result.stdout.strip()
 
 
-def _table_counts() -> dict[str, int]:
-    row = _psql(
-        "SELECT (SELECT count(*) FROM orders), "
-        "(SELECT count(*) FROM order_events), "
-        "(SELECT count(*) FROM work_items), "
-        "(SELECT count(*) FROM intake_keys), "
-        "(SELECT count(*) FROM attempts)"
-    )
-    orders, events, work, keys, attempts = (int(part) for part in row.split("|"))
-    return {
-        "orders": orders,
-        "order_events": events,
-        "work_items": work,
-        "intake_keys": keys,
-        "attempts": attempts,
-    }
+def _accept_counts() -> tuple[int, int]:
+    """Worker may write events/attempts/poll items; it never inserts orders or intake keys."""
+    row = _psql("SELECT (SELECT count(*) FROM orders), (SELECT count(*) FROM intake_keys)")
+    orders, keys = (int(part) for part in row.split("|"))
+    return orders, keys
 
 
 def _post(
@@ -104,17 +93,17 @@ def test_post_201_get_placed_replay_same_id_different_cart_409() -> None:
     assert fetched.status_code == 200, fetched.text
     got = fetched.json()
     assert got["id"] == order_id
-    assert got["state"] == "placed"
+    assert got["state"] in {"placed", "confirmed", "being_prepared", "ready"}
     assert got["accepted_at"]
     assert got["items"] == ["burrito"]
     assert got["cohort_id"] == str(DEFAULT_COHORT_ID)
 
     work = _psql(
-        f"SELECT type, status, idempotency_key FROM work_items WHERE order_id = '{order_id}'"
+        "SELECT type, idempotency_key FROM work_items "
+        f"WHERE order_id = '{order_id}' AND type = 'confirm'"
     )
-    work_type, status, stored_key = work.split("|")
+    work_type, stored_key = work.split("|")
     assert work_type == "confirm"
-    assert status == "pending"
     assert stored_key == confirm_idempotency_key(uuid.UUID(order_id))
     assert "confirm" in stored_key
 
@@ -157,15 +146,16 @@ def test_optional_cohort_id_is_stored() -> None:
     ],
 )
 def test_malformed_and_over_cap_carts_create_zero_rows(kwargs: dict[str, object]) -> None:
-    before = _table_counts()
+    before = _accept_counts()
     place_key = f"test-bad-{uuid.uuid4()}"
     response = _post(kwargs["items"], place_key)  # type: ignore[arg-type]
     assert 400 <= response.status_code < 500, response.text
-    assert _table_counts() == before
+    assert _accept_counts() == before
+    assert _psql(f"SELECT count(*) FROM intake_keys WHERE place_key = '{place_key}'") == "0"
 
 
 def test_missing_place_key_creates_zero_rows() -> None:
-    before = _table_counts()
+    before = _accept_counts()
     try:
         response = httpx.post(
             f"{API_URL}/orders",
@@ -176,25 +166,27 @@ def test_missing_place_key_creates_zero_rows() -> None:
     except httpx.RequestError as exc:
         pytest.fail(f"API is down: {exc}")
     assert 400 <= response.status_code < 500, response.text
-    assert _table_counts() == before
+    assert _accept_counts() == before
 
 
 def test_malformed_json_creates_zero_rows() -> None:
-    before = _table_counts()
+    before = _accept_counts()
+    place_key = f"test-malformed-{uuid.uuid4()}"
     try:
         response = httpx.post(
             f"{API_URL}/orders",
             content=b"{not-json",
             headers={
                 "Content-Type": "application/json",
-                "Idempotency-Key": f"test-malformed-{uuid.uuid4()}",
+                "Idempotency-Key": place_key,
             },
             timeout=5.0,
         )
     except httpx.RequestError as exc:
         pytest.fail(f"API is down: {exc}")
     assert 400 <= response.status_code < 500, response.text
-    assert _table_counts() == before
+    assert _accept_counts() == before
+    assert _psql(f"SELECT count(*) FROM intake_keys WHERE place_key = '{place_key}'") == "0"
 
 
 def test_timeline_b_no_order_without_confirm_work_item() -> None:
@@ -203,8 +195,7 @@ def test_timeline_b_no_order_without_confirm_work_item() -> None:
     assert created.status_code == 201, created.text
     order_id = created.json()["id"]
     work_count = _psql(
-        "SELECT count(*) FROM work_items "
-        f"WHERE order_id = '{order_id}' AND type = 'confirm' AND status = 'pending'"
+        f"SELECT count(*) FROM work_items WHERE order_id = '{order_id}' AND type = 'confirm'"
     )
     assert work_count == "1"
     orphans = _psql(
@@ -213,12 +204,6 @@ def test_timeline_b_no_order_without_confirm_work_item() -> None:
         ")"
     )
     assert orphans == "0"
-    attempts = _psql(
-        "SELECT count(*) FROM attempts a "
-        "JOIN work_items w ON w.id = a.work_item_id "
-        f"WHERE w.order_id = '{order_id}'"
-    )
-    assert attempts == "0"
 
 
 def test_timeline_a_retried_place_key_is_one_order() -> None:
@@ -247,7 +232,7 @@ def test_concurrent_same_key_is_one_order() -> None:
     """N racers, one key: UniqueViolation recovery, one id, no leftover rows."""
     place_key = f"test-concurrent-{uuid.uuid4()}"
     workers = 12
-    before = _table_counts()
+    before = _accept_counts()
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(_post, ["burrito"], place_key, timeout=15.0) for _ in range(workers)]
         responses = [future.result() for future in futures]
@@ -255,12 +240,23 @@ def test_concurrent_same_key_is_one_order() -> None:
     assert failures == []
     ids = {response.json()["id"] for response in responses}
     assert len(ids) == 1
-    after = _table_counts()
-    assert after["orders"] - before["orders"] == 1
-    assert after["order_events"] - before["order_events"] == 1
-    assert after["work_items"] - before["work_items"] == 1
-    assert after["intake_keys"] - before["intake_keys"] == 1
-    assert after["attempts"] - before["attempts"] == 0
+    order_id = next(iter(ids))
+    after = _accept_counts()
+    assert after[0] - before[0] == 1
+    assert after[1] - before[1] == 1
+    assert _psql(f"SELECT count(*) FROM orders WHERE id = '{order_id}'") == "1"
+    assert _psql(f"SELECT count(*) FROM intake_keys WHERE place_key = '{place_key}'") == "1"
+    assert (
+        _psql(f"SELECT count(*) FROM work_items WHERE order_id = '{order_id}' AND type = 'confirm'")
+        == "1"
+    )
+    assert (
+        _psql(
+            "SELECT count(*) FROM order_events "
+            f"WHERE order_id = '{order_id}' AND cause = 'place' AND applied"
+        )
+        == "1"
+    )
 
 
 def test_get_missing_order_is_404() -> None:
