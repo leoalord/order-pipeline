@@ -245,7 +245,7 @@ def test_ready_enqueues_dispatch_work_item(
         assert poll_item.status == "completed"
         assert dispatch_item.idempotency_key == dispatch_idempotency_key(order_id)
         assert dispatch_item.status == "pending"
-        assert dispatch_item.next_attempt_at == now
+        assert dispatch_item.next_attempt_at == now + timedelta(seconds=_settings().poll_interval_s)
 
 
 def test_dispatch_uses_stored_key_and_schedules_ride_at_eta(

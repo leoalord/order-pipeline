@@ -7,6 +7,7 @@ import os
 import random
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 import pytest
 from sqlalchemy import select
@@ -16,6 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from order_pipeline.cancel import CancelOutcome, cancel_order
 from order_pipeline.intake import place_order
 from order_pipeline.models import Attempt, Order, OrderEvent, WorkItem
+from order_pipeline.worker.chassis import Worker
 from order_pipeline.worker.claim import claim_next
 from order_pipeline.worker.classify import classify_status
 from order_pipeline.worker.counters import WorkerCounters
@@ -32,6 +34,7 @@ from order_pipeline.worker.plugin import (
     GuardedTransition,
     HandlerResult,
     WorkDisposition,
+    WorkHandler,
 )
 from order_pipeline.worker.settings import WorkerSettings
 
@@ -53,12 +56,18 @@ LEASE_LIFECYCLE_CAUSES = frozenset(
 )
 
 
-def _settings(*, dep_cap_rsim: int = 8, dep_cap_csim: int = 8) -> WorkerSettings:
+def _settings(
+    *,
+    dep_cap_rsim: int = 8,
+    dep_cap_csim: int = 8,
+    task_capacity: int = 24,
+) -> WorkerSettings:
     return WorkerSettings(
         database_url=TEST_DATABASE_URL,
         restaurant_base_url="http://restaurant:8081",
         dep_cap_rsim=dep_cap_rsim,
         dep_cap_csim=dep_cap_csim,
+        task_capacity=task_capacity,
     )
 
 
@@ -510,6 +519,78 @@ def test_csim_semaphore_respects_dep_cap_only() -> None:
         assert rsim_max == 6
 
     asyncio.run(_run())
+
+
+def test_eligible_types_excludes_full_dependency() -> None:
+    caps = DepCaps(_settings(dep_cap_rsim=1, dep_cap_csim=1))
+    registered = ("confirm", "poll_cook", "dispatch", "poll_ride")
+    assert set(caps.eligible_types(registered)) == set(registered)
+    caps.admit("confirm")
+    eligible = caps.eligible_types(registered)
+    assert "confirm" not in eligible
+    assert "poll_cook" not in eligible
+    assert "dispatch" in eligible
+    assert "poll_ride" in eligible
+    caps.admit("dispatch")
+    assert caps.eligible_types(registered) == ()
+    caps.release_admit("confirm")
+    assert "confirm" in caps.eligible_types(registered)
+    assert "dispatch" not in caps.eligible_types(registered)
+
+
+def test_run_does_not_claim_kitchen_when_rsim_is_full(db_engine: Engine) -> None:
+    settings = _settings(dep_cap_rsim=1, dep_cap_csim=1, task_capacity=4)
+    caps = DepCaps(settings)
+    caps.admit("confirm")
+    seen: list[tuple[str, ...]] = []
+
+    async def unused(_claimed: ClaimedWork) -> HandlerResult:
+        raise AssertionError("handler must not run")
+
+    worker = Worker(
+        settings,
+        db_engine,
+        handlers={
+            "confirm": cast(WorkHandler, unused),
+            "poll_cook": cast(WorkHandler, unused),
+            "dispatch": cast(WorkHandler, unused),
+            "poll_ride": cast(WorkHandler, unused),
+        },
+        caps=caps,
+        worker_id="admit-filter",
+        idle_s=0.01,
+    )
+
+    def spy_claim(
+        *,
+        work_item_id: uuid.UUID | None = None,
+        work_types: tuple[str, ...] | None = None,
+    ) -> ClaimedWork | None:
+        assert work_item_id is None
+        assert work_types is not None
+        seen.append(work_types)
+        return None
+
+    worker.claim = spy_claim  # type: ignore[method-assign]
+
+    async def _run() -> None:
+        task = asyncio.create_task(worker.run())
+        try:
+            await asyncio.sleep(0.05)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    asyncio.run(_run())
+    assert seen
+    for types in seen:
+        assert "confirm" not in types
+        assert "poll_cook" not in types
+        assert "dispatch" in types
+        assert "poll_ride" in types
 
 
 def test_courier_base_url_is_compose_wiring(monkeypatch: pytest.MonkeyPatch) -> None:

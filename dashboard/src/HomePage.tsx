@@ -153,7 +153,7 @@ export function HomePage() {
             <h3>duplicate attempts vs duplicate effects</h3>
             <p className="hint">
               Extra worker calls vs extra tickets in the sim ledgers. Effects
-              must stay 0.
+              must stay 0. A dash means a sim ledger could not be read.
             </p>
             <dl>
               <div>

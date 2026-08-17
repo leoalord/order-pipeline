@@ -25,7 +25,7 @@ DASHBOARD_URL = "http://127.0.0.1:5173"
 RSIM_URL = "http://localhost:8081"
 CSIM_URL = "http://localhost:8082"
 WALK_TIMEOUT_S = 180.0
-POLL_EVERY_S = 0.05
+POLL_EVERY_S = 1.0  # SPA cadence (dashboard/src/snapshot.ts POLL_MS)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STORED_TO_ASSIGNMENT = {
     "placed": "placed",
@@ -150,18 +150,15 @@ def test_one_order_walks_every_stage_on_slash_cards() -> None:
             if label and (not sequence or sequence[-1] != label):
                 sequence.append(label)
         seen_events = sequence
-        if seen_events[-1:] == ["delivered"]:
+        if seen_events[-1:] == ["delivered"] and "ready" in seen_current:
             break
         time.sleep(POLL_EVERY_S)
 
     assert last_body is not None
     assert seen_events[-1:] == ["delivered"], f"order {order_id} events={seen_events}"
-    if "placed" not in seen_current:
-        assert "placed" in seen_events
-        seen_current.insert(0, "placed")
-    if "ready" not in seen_current and "out for delivery" in seen_current:
-        assert "ready" in seen_events, seen_current
-        seen_current.insert(seen_current.index("out for delivery"), "ready")
+    assert "ready" in seen_current, (
+        f"ready card never appeared; seen_current={seen_current} events={seen_events}"
+    )
     assert tuple(seen_events) == STAGE_NAMES, seen_events
     assert seen_current[-1] == "delivered"
     assert last_body["stages"]["delivered"] >= 1

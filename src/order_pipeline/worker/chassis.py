@@ -52,14 +52,20 @@ class Worker:
     def register(self, work_type: str, handler: WorkHandler) -> None:
         self.handlers[work_type] = handler
 
-    def claim(self, *, work_item_id: uuid.UUID | None = None) -> ClaimedWork | None:
+    def claim(
+        self,
+        *,
+        work_item_id: uuid.UUID | None = None,
+        work_types: tuple[str, ...] | None = None,
+    ) -> ClaimedWork | None:
+        types = work_types if work_types is not None else tuple(self.handlers)
         with self._sessions.begin() as session:
             return claim_next(
                 session,
                 now=self.now_fn(),
                 lease_s=self.settings.lease_s,
                 worker_id=self.worker_id,
-                work_types=tuple(self.handlers),
+                work_types=types,
                 work_item_id=work_item_id,
             )
 
@@ -97,13 +103,24 @@ class Worker:
 
     async def run(self) -> None:
         in_flight = asyncio.Semaphore(self.settings.task_capacity)
+        registered = tuple(self.handlers)
         while True:
+            eligible = self.caps.eligible_types(registered)
+            if not eligible:
+                await asyncio.sleep(self.idle_s)
+                continue
             await in_flight.acquire()
-            claimed = await asyncio.to_thread(self.claim)
+            eligible = self.caps.eligible_types(registered)
+            if not eligible:
+                in_flight.release()
+                await asyncio.sleep(self.idle_s)
+                continue
+            claimed = await asyncio.to_thread(self.claim, work_types=eligible)
             if claimed is None:
                 in_flight.release()
                 await asyncio.sleep(self.idle_s)
                 continue
+            self.caps.admit(claimed.work_type)
             asyncio.create_task(self._process_and_release(claimed, in_flight))
 
     async def _process_and_release(
@@ -112,4 +129,5 @@ class Worker:
         try:
             await self.process(claimed)
         finally:
+            self.caps.release_admit(claimed.work_type)
             in_flight.release()
