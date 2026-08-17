@@ -28,7 +28,6 @@ TEST_DATABASE_URL = "postgresql+psycopg://postgres:postgres@127.0.0.1:55432/orde
 REPO_ROOT = Path(__file__).resolve().parents[1]
 API_URL = "http://localhost:8000"
 RSIM_URL = "http://localhost:8081"
-WORKER_URL = "http://localhost:8083"
 CONFIRM_TIMEOUT_S = 40.0
 POLL_EVERY_S = 0.2
 CONFIRMED_OR_BEYOND = frozenset(
@@ -147,28 +146,61 @@ def _compose(*args: str, timeout: float = 60.0) -> None:
         pytest.fail(f"docker compose {' '.join(args)} failed: {detail}")
 
 
+def _worker_ids(*, running: bool | None = None) -> list[str]:
+    args = ["docker", "compose", "ps", "-q", "worker"]
+    if running is True:
+        args = ["docker", "compose", "ps", "-q", "--status", "running", "worker"]
+    result = subprocess.run(
+        args,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30.0,
+    )
+    if result.returncode != 0:
+        pytest.fail(f"docker compose ps worker failed: {result.stderr or result.stdout}")
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def _health_status(container_id: str) -> str:
+    result = subprocess.run(
+        [
+            "docker",
+            "inspect",
+            "-f",
+            "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}",
+            container_id,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10.0,
+    )
+    if result.returncode != 0:
+        return f"inspect-failed:{result.stderr.strip()}"
+    return result.stdout.strip()
+
+
 def _wait_worker_healthy(*, attempts: int = 80) -> None:
-    last_error = "no attempts"
+    last = "no attempts"
     for _ in range(attempts):
-        try:
-            response = httpx.get(f"{WORKER_URL}/health", timeout=2.0)
-            if response.status_code == 200 and response.json() == {"status": "ok"}:
+        ids = _worker_ids(running=True)
+        if len(ids) >= 2:
+            statuses = [_health_status(cid) for cid in ids]
+            if statuses and all(status == "healthy" for status in statuses):
                 return
-            last_error = f"status {response.status_code}: {response.text}"
-        except httpx.RequestError as exc:
-            last_error = str(exc)
+            last = f"ids={ids} health={statuses}"
+        else:
+            last = f"running worker ids={ids}"
         time.sleep(0.25)
-    pytest.fail(f"worker never became healthy on {WORKER_URL}: {last_error}")
+    pytest.fail(f"workers never became healthy: {last}")
 
 
 def _wait_worker_down(*, attempts: int = 40) -> None:
     for _ in range(attempts):
-        try:
-            httpx.get(f"{WORKER_URL}/health", timeout=1.0)
-        except httpx.RequestError:
+        if not _worker_ids(running=True):
             return
         time.sleep(0.25)
-    pytest.fail("worker still answering health after compose stop")
+    pytest.fail("worker still running after compose stop")
 
 
 @pytest.mark.parametrize("mode", ["5xx_after", "drop"])

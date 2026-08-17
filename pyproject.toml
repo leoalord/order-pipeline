@@ -29,6 +29,7 @@ dev = [
 restaurant-sim = "order_pipeline.restaurant.__main__:main"
 courier-sim = "order_pipeline.courier.__main__:main"
 worker = "order_pipeline.worker.__main__:main"
+loadgen = "order_pipeline.loadgen.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -53,6 +54,7 @@ plugins = ["pydantic.mypy"]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
 addopts = "-q"
+markers = ["slow: compose calibrate / long integration"]
 
 [tool.pydantic-mypy]
 init_forbid_extra = true

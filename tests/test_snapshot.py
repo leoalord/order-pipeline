@@ -132,6 +132,18 @@ def test_snapshot_fields_cohort_filter_and_trace_null_attempts(
     assert snap.currently_leased == 0
     assert tuple(snap.stages) == STAGE_NAMES
     assert snap.stages["confirmed"] == 1
+    assert snap.backlog["confirm"] == 1
+    assert snap.oldest_open.stage == "confirmed"
+    assert snap.oldest_open.age_s is not None
+    assert snap.http_429s.door == 0
+    assert snap.http_429s.kitchen == 0
+    assert snap.http_429s.courier == 0
+    assert snap.accept_reject.accepted == 1
+    assert snap.accept_reject.rejected == 0
+    assert snap.parked_list == []
+    assert snap.retry_rate >= 0
+    assert snap.sim_http.restaurant.requests_per_min >= 0
+    assert snap.no_progress_beyond_threshold.count >= 0
     assert snap.trace is not None
     assert snap.trace.order_id == order_id
     outcomes = [row.outcome for row in snap.trace.attempts]
@@ -147,6 +159,70 @@ def test_snapshot_fields_cohort_filter_and_trace_null_attempts(
     assert all(row.started_at is not None for row in snap.trace.attempts)
     assert snap.trace.attempts[0].ended_at is None
     assert snap.trace.attempts[1].ended_at is not None
+
+
+def test_snapshot_stages_split_queued_confirmed_from_cooking_being_prepared(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Existing `/` stage cards: confirmed = queued, being prepared = cooking."""
+    cohort = uuid.uuid4()
+    now = datetime.now(UTC)
+    with session_factory.begin() as session:
+        queued = _place(session, cohort_id=cohort)
+        cooking = _place(session, cohort_id=cohort)
+        queued.state = "confirmed"
+        queued.version += 1
+        cooking.state = "being_prepared"
+        cooking.version += 1
+        session.flush()
+        snap = build_snapshot(session, cohort_id=cohort, now=now, ledger_counts=())
+    assert snap.stages["confirmed"] == 1
+    assert snap.stages["being prepared"] == 1
+    assert snap.stages["placed"] == 0
+
+
+def test_stretching_etas_measure_only_sim_rail_wait(
+    session_factory: sessionmaker[Session],
+) -> None:
+    cohort = uuid.uuid4()
+    now = datetime.now(UTC)
+    with session_factory() as session:
+        session.begin()
+        try:
+            quiet = _place(session, cohort_id=cohort)
+            stretched = _place(session, cohort_id=cohort)
+            session.flush()
+
+            for order, rail_wait in ((quiet, 0), (stretched, 10)):
+                order.state = "out_for_delivery"
+                order.version += 1
+                sim_accepted = now + timedelta(seconds=40)
+                service_started = sim_accepted + timedelta(seconds=rail_wait)
+                session.add(
+                    WorkItem(
+                        order_id=order.id,
+                        work_type="dispatch",
+                        status="pending",
+                        idempotency_key=f"stretch-dispatch-{order.id}",
+                        attempt_count=0,
+                        next_attempt_at=now,
+                        result={
+                            "accepted_at": sim_accepted.isoformat(),
+                            "service_started_at": service_started.isoformat(),
+                            "estimated_ready_at": (
+                                service_started + timedelta(seconds=12)
+                            ).isoformat(),
+                        },
+                    )
+                )
+
+            session.flush()
+            snap = build_snapshot(session, cohort_id=cohort, now=now, ledger_counts=())
+        finally:
+            session.rollback()
+
+    assert snap.stretching_etas.count == 1
+    assert snap.stretching_etas.max_stretch_s == 10.0
 
 
 def test_startup_scan_and_mismatch_and_leased_and_parked_outside(
@@ -200,6 +276,12 @@ def test_startup_scan_and_mismatch_and_leased_and_parked_outside(
             assert snap.conservation.residual == 1
             assert snap.state_vs_last_order_events_mismatches >= 1
             assert snap.invalid_transitions == 0
+            assert len(snap.parked_list) == 1
+            assert snap.parked_list[0].owner == "worker-1"
+            assert snap.parked_list[0].reason == "retry_budget_exhausted"
+            assert snap.parked_list[0].next_action == "redrive"
+            assert snap.backlog["confirm"] == 1
+            assert snap.http_429s.door == 0
         finally:
             session.rollback()
 
@@ -244,6 +326,10 @@ def test_snapshot_duplicate_effects_none_when_ledgers_unavailable(
             now=now,
             ledger_counts=(),
             ledgers_ok=False,
+            door_429s=3,
         )
     assert snap.duplicate_effects is None
     assert snap.conservation.residual == 0
+    assert snap.http_429s.door == 3
+    assert snap.accept_reject.rejected == 3
+    assert snap.accept_reject.accepted == 1

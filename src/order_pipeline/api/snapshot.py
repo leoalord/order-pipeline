@@ -12,10 +12,18 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from order_pipeline.api.schemas import (
+    AcceptReject,
     Conservation,
     E2eLatency,
+    Http429s,
+    NoProgress,
+    OldestOpen,
     OrderTrace,
+    ParkedRow,
+    SimHttp,
+    SimHttpLane,
     SnapshotResponse,
+    StretchingEtas,
     TerminalRates,
     TraceAttempt,
     TraceEvent,
@@ -45,6 +53,11 @@ STATE_TO_STAGE = {
 
 TERMINAL_STATES = frozenset({"delivered", "cancelled", "failed"})
 RATE_WINDOW = timedelta(seconds=60)
+NO_PROGRESS_THRESHOLD_S = 90.0
+BACKLOG_TYPES = ("confirm", "poll_cook", "dispatch", "poll_ride")
+BACKLOG_STATUSES = frozenset({"pending", "leased"})
+KITCHEN_WORK = frozenset({"confirm", "poll_cook", "submit"})
+COURIER_WORK = frozenset({"dispatch", "poll_ride"})
 
 
 def order_id_from_ledger_key(key: str) -> UUID | None:
@@ -132,6 +145,60 @@ def _empty_stages() -> dict[str, int]:
     return {name: 0 for name in STAGE_NAMES}
 
 
+def _parse_iso(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return _aware(parsed)
+
+
+def _time_from_blob(blob: object, field: str) -> datetime | None:
+    if not isinstance(blob, dict):
+        return None
+    return _parse_iso(blob.get(field))
+
+
+def _rail_wait_s(item: WorkItem) -> float | None:
+    for blob in (item.result, item.payload):
+        accepted = _time_from_blob(blob, "accepted_at")
+        started = _time_from_blob(blob, "service_started_at")
+        if accepted is not None and started is not None:
+            return max(0.0, (started - accepted).total_seconds())
+    return None
+
+
+def _empty_backlog() -> dict[str, int]:
+    return {name: 0 for name in BACKLOG_TYPES}
+
+
+def _sim_lane(
+    attempts: Sequence[Attempt],
+    work_by_id: Mapping[UUID, WorkItem],
+    work_types: frozenset[str],
+    window_start: datetime,
+) -> SimHttpLane:
+    window_rows = [
+        attempt
+        for attempt in attempts
+        if (item := work_by_id.get(attempt.work_item_id)) is not None
+        and item.work_type in work_types
+        and _aware(attempt.started_at) >= window_start
+    ]
+    latencies: list[float] = []
+    for attempt in window_rows:
+        if attempt.ended_at is None:
+            continue
+        latencies.append((_aware(attempt.ended_at) - _aware(attempt.started_at)).total_seconds())
+    return SimHttpLane(
+        requests_per_min=float(len(window_rows)),
+        latency_p50_s=percentile(latencies, 50),
+        latency_p95_s=percentile(latencies, 95),
+    )
+
+
 def build_snapshot(
     session: Session,
     *,
@@ -140,6 +207,7 @@ def build_snapshot(
     ledger_counts: Sequence[Mapping[str, int]],
     order_id: UUID | None = None,
     ledgers_ok: bool = True,
+    door_429s: int = 0,
 ) -> SnapshotResponse:
     """Assemble the snapshot from Postgres + already-fetched sim ledgers. No HTTP here."""
     orders = list(session.scalars(select(Order).where(Order.cohort_id == cohort_id)))
@@ -237,6 +305,7 @@ def build_snapshot(
         latencies.append((_aware(finished) - _aware(order.accepted_at)).total_seconds())
 
     work_by_id = {item.id: item for item in work_items}
+    orders_by_id = {order.id: order for order in orders}
     trace: OrderTrace | None = None
     if order_id is not None:
         trace = _trace(
@@ -246,6 +315,96 @@ def build_snapshot(
             attempts=attempts,
             work_by_id=work_by_id,
         )
+
+    backlog = _empty_backlog()
+    for item in work_items:
+        if item.status not in BACKLOG_STATUSES or item.work_type not in backlog:
+            continue
+        backlog[item.work_type] += 1
+
+    first_started: dict[UUID, datetime] = {}
+    for attempt in sorted(attempts, key=lambda row: (_aware(row.started_at), row.id)):
+        if attempt.work_item_id not in first_started:
+            first_started[attempt.work_item_id] = _aware(attempt.started_at)
+    window_attempts = [row for row in attempts if _aware(row.started_at) >= window_start]
+    retries = sum(
+        1 for row in window_attempts if first_started[row.work_item_id] < _aware(row.started_at)
+    )
+    retry_rate = (retries / len(window_attempts)) if window_attempts else 0.0
+
+    oldest_order: Order | None = None
+    for order in orders:
+        if order.state in TERMINAL_STATES:
+            continue
+        if oldest_order is None or _aware(order.accepted_at) < _aware(oldest_order.accepted_at):
+            oldest_order = order
+    oldest_open = OldestOpen(
+        age_s=(
+            (at - _aware(oldest_order.accepted_at)).total_seconds()
+            if oldest_order is not None
+            else None
+        ),
+        stage=(STATE_TO_STAGE.get(oldest_order.state) if oldest_order is not None else None),
+    )
+
+    kitchen_429s = courier_429s = 0
+    for attempt in attempts:
+        if attempt.outcome != "http_429":
+            continue
+        work_item = work_by_id.get(attempt.work_item_id)
+        if work_item is None:
+            continue
+        work_type = work_item.work_type
+        if work_type in KITCHEN_WORK:
+            kitchen_429s += 1
+        elif work_type in COURIER_WORK:
+            courier_429s += 1
+
+    stretch_by_order: dict[UUID, float] = {}
+    for item in work_items:
+        live = orders_by_id.get(item.order_id)
+        if live is None or live.state in TERMINAL_STATES:
+            continue
+        if live.state in {"placed", "confirmed", "being_prepared"}:
+            relevant_types = KITCHEN_WORK
+        elif live.state == "out_for_delivery":
+            relevant_types = COURIER_WORK
+        else:
+            continue
+        if item.work_type not in relevant_types:
+            continue
+        stretch = _rail_wait_s(item)
+        if stretch is None:
+            continue
+        prev_stretch = stretch_by_order.get(live.id)
+        if prev_stretch is None or stretch > prev_stretch:
+            stretch_by_order[live.id] = stretch
+    stretching = [value for value in stretch_by_order.values() if value > 0]
+    stretching_etas = StretchingEtas(
+        count=len(stretching),
+        max_stretch_s=max(stretching) if stretching else None,
+    )
+
+    parked_list = [
+        ParkedRow(
+            order_id=item.order_id,
+            work_type=item.work_type,
+            owner=item.park_owner,
+            reason=item.park_reason,
+            next_action=item.park_next_action,
+        )
+        for item in work_items
+        if item.status == "parked"
+    ]
+
+    stalled = 0
+    for order in orders:
+        if order.state in TERMINAL_STATES:
+            continue
+        last = last_applied.get(order.id)
+        stamp = _aware(last.timestamp) if last is not None else _aware(order.accepted_at)
+        if (at - stamp).total_seconds() > NO_PROGRESS_THRESHOLD_S:
+            stalled += 1
 
     return SnapshotResponse(
         cohort_id=cohort_id,
@@ -274,6 +433,21 @@ def build_snapshot(
         state_vs_last_order_events_mismatches=mismatches,
         currently_leased=currently_leased,
         trace=trace,
+        accept_reject=AcceptReject(accepted=accepted, rejected=door_429s),
+        backlog=backlog,
+        retry_rate=retry_rate,
+        oldest_open=oldest_open,
+        http_429s=Http429s(door=door_429s, kitchen=kitchen_429s, courier=courier_429s),
+        stretching_etas=stretching_etas,
+        parked_list=parked_list,
+        sim_http=SimHttp(
+            restaurant=_sim_lane(attempts, work_by_id, KITCHEN_WORK, window_start),
+            courier=_sim_lane(attempts, work_by_id, COURIER_WORK, window_start),
+        ),
+        no_progress_beyond_threshold=NoProgress(
+            threshold_s=NO_PROGRESS_THRESHOLD_S,
+            count=stalled,
+        ),
     )
 
 

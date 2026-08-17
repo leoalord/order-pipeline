@@ -1,4 +1,4 @@
-"""Dashboard SPA source and harness: cards, stub /control, tsc, reserved proxy."""
+"""Dashboard SPA source and harness: cards, /control load group, tsc, reserved proxy."""
 
 from __future__ import annotations
 
@@ -38,6 +38,15 @@ def test_dashboard_source_has_assignment_stage_cards_and_lite_fields() -> None:
     for label in ASSIGNMENT_STAGES:
         assert f'"{label}"' in snapshot, label
     assert "STAGE_LABELS.map" in home
+    assert "STAGE_SEAMS" in home
+    assert "queued" in home
+    assert "cooking" in home
+    assert "waiting for" in home
+    assert "on a pan" in home
+    assert '"confirmed"' in snapshot
+    assert '"being prepared"' in snapshot
+    assert "queued — waiting for a pan" in snapshot
+    assert "cooking — on a pan" in snapshot
     assert "stages?.[" in home
     assert "snapshot.stages" in home or "stages?.[" in home
     assert "currently_leased" in home
@@ -49,6 +58,26 @@ def test_dashboard_source_has_assignment_stage_cards_and_lite_fields() -> None:
     assert "conservation" in home
     assert "terminal_rates_per_min" in home
     assert "e2e_latency_s" in home
+    assert "oldest_open" in home
+    assert "accept_reject" in home
+    assert "backlog" in home
+    assert "retry_rate" in home
+    assert "http_429s" in home
+    assert "stretching_etas" in home
+    assert "sim_http" in home
+    assert "parked_list" in home
+    assert "no_progress_beyond_threshold" in home
+    assert "fetchLoadgenStatus" in home
+    assert "cohortId: loadgen.cohort_id" in home
+    assert 'fetch("/loadgen/status"' in snapshot
+    assert "Pipeline" in home
+    assert "parked list" in home
+    assert "oldest open" in home
+    assert "<button" not in home.lower()
+    assert "redrive" not in home.lower()
+    assert "utilization" not in home.lower()
+    assert "slot-use" not in home.lower()
+    assert "slot use vs cap" not in home.lower()
     assert "paste-an-ID" in home
     assert "in each stage now" in home
     assert "last 60 seconds" in home
@@ -57,12 +86,27 @@ def test_dashboard_source_has_assignment_stage_cards_and_lite_fields() -> None:
     assert "chart" not in home.lower()
 
 
-def test_control_is_empty_stub_without_buttons() -> None:
+def test_control_load_group_posts_to_loadgen_proxy() -> None:
     control = (DASHBOARD / "src" / "ControlPage.tsx").read_text()
+    shell = (DASHBOARD / "src" / "Shell.tsx").read_text()
     assert "<h1>Control</h1>" in control
-    assert "later slice" in control
-    assert "<button" not in control.lower()
-    assert "pipeline" not in control.lower()
+    assert "fetch(`/loadgen${path}`" in control
+    for path in ("/calibrate", "/cohort/new", "/scenario/steady", "/scenario/rush", "/stop"):
+        assert path in control, path
+    assert "Calibrate" in control
+    assert "New cohort" in control
+    assert "Steady" in control
+    assert "Rush" in control
+    assert "Stop" in control
+    assert "mult" in control
+    assert "blackout" not in control.lower()
+    assert "redrive" not in control.lower()
+    assert "doom" not in control.lower()
+    assert "fail_void" not in control.lower()
+    assert "stock" not in control.lower()
+    assert "kill" not in control.lower()
+    assert 'target="_blank"' in shell
+    assert 'href="/control"' in shell
 
 
 def test_only_vite_knob_is_api_base_url() -> None:
@@ -93,7 +137,7 @@ def test_makefile_wires_tsc_into_check() -> None:
     assert "npm --prefix dashboard run tsc" in makefile
 
 
-def test_compose_dashboard_on_5173_no_loadgen_service() -> None:
+def test_compose_dashboard_on_5173_with_loadgen_proxy() -> None:
     compose = (REPO_ROOT / "docker-compose.yml").read_text()
     assert "\n  dashboard:" in compose
     assert '"5173:5173"' in compose
@@ -101,7 +145,7 @@ def test_compose_dashboard_on_5173_no_loadgen_service() -> None:
     assert "LOADGEN_PROXY_TARGET: http://loadgen:8090" in compose
     assert "RSIM_PROXY_TARGET: http://restaurant:8081" in compose
     assert "CSIM_PROXY_TARGET: http://courier:8082" in compose
-    assert "\n  loadgen:" not in compose
+    assert "\n  loadgen:" in compose
     dockerfile = (DASHBOARD / "Dockerfile").read_text()
     assert dockerfile.lstrip().startswith("FROM node:")
     python_df = (REPO_ROOT / "Dockerfile").read_text()

@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import subprocess
+import threading
+import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy import text
+from sqlalchemy.engine import Engine
 
+from order_pipeline.api.settings import APISettings
 from order_pipeline.intake import DEFAULT_COHORT_ID, confirm_idempotency_key
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -266,3 +271,84 @@ def test_get_missing_order_is_404() -> None:
     except httpx.RequestError as exc:
         pytest.fail(f"API is down: {exc}")
     assert response.status_code == 404
+
+
+def test_saturate_accept_concurrency_429_creates_no_order(db_engine: Engine) -> None:
+    """Hold Place Order in-flight at the door cap; extras 429 and never insert."""
+    door_cap = APISettings(
+        database_url="postgresql+psycopg://postgres:postgres@localhost/unused"
+    ).accept_concurrency
+    extra = 8
+    n = door_cap + extra
+    keys = [f"test-door-{uuid.uuid4()}" for _ in range(n)]
+    before = _accept_counts()
+
+    lock_held = threading.Event()
+    release_lock = threading.Event()
+    lock_errors: list[BaseException] = []
+
+    def hold_orders_share_lock() -> None:
+        # SHARE blocks INSERT/UPDATE (ROW EXCLUSIVE) but not SELECT, so we can
+        # count rows while the admitted POSTs sit in-flight.
+        try:
+            with db_engine.connect() as conn:
+                trans = conn.begin()
+                conn.execute(text("LOCK TABLE orders IN SHARE MODE"))
+                lock_held.set()
+                if not release_lock.wait(timeout=30):
+                    trans.rollback()
+                    return
+                trans.rollback()
+        except BaseException as exc:
+            lock_errors.append(exc)
+            lock_held.set()
+
+    locker = threading.Thread(target=hold_orders_share_lock, daemon=True)
+    locker.start()
+    if not lock_held.wait(timeout=5):
+        pytest.fail("could not lock orders to hold Place Order in-flight")
+    if lock_errors:
+        pytest.fail(f"orders SHARE lock failed: {lock_errors[0]!r}")
+
+    pool = ThreadPoolExecutor(max_workers=n)
+    futures: list[Future[httpx.Response]] = []
+    try:
+        futures = [pool.submit(_post, ["chips"], key, timeout=30.0) for key in keys]
+        deadline = time.monotonic() + 15
+        rejected: list[tuple[str, httpx.Response]] = []
+        while time.monotonic() < deadline:
+            rejected = []
+            for key, future in zip(keys, futures, strict=True):
+                if not future.done():
+                    continue
+                response = future.result()
+                if response.status_code == 429:
+                    rejected.append((key, response))
+            if len(rejected) >= extra:
+                break
+            time.sleep(0.05)
+        assert rejected, "door cap never returned 429 while Place Order was held in-flight"
+        for key, response in rejected:
+            assert response.json()["detail"] == "door busy"
+            assert _psql(f"SELECT count(*) FROM intake_keys WHERE place_key = '{key}'") == "0"
+        assert _accept_counts() == before
+    finally:
+        release_lock.set()
+        locker.join(timeout=5)
+        pool.shutdown(wait=True)
+
+    responses = [future.result(timeout=30) for future in futures]
+    statuses = [response.status_code for response in responses]
+    created = sum(1 for status in statuses if status == 201)
+    busy = sum(1 for status in statuses if status == 429)
+    assert set(statuses) <= {201, 429}, statuses
+    assert created == door_cap
+    assert busy == extra
+    after = _accept_counts()
+    assert after[0] - before[0] == created
+    assert after[1] - before[1] == created
+    for key, response in zip(keys, responses, strict=True):
+        if response.status_code != 429:
+            continue
+        assert response.json()["detail"] == "door busy"
+        assert _psql(f"SELECT count(*) FROM intake_keys WHERE place_key = '{key}'") == "0"

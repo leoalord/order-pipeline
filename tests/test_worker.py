@@ -19,7 +19,7 @@ from order_pipeline.intake import place_order
 from order_pipeline.models import Attempt, Order, OrderEvent, WorkItem
 from order_pipeline.worker.chassis import Worker
 from order_pipeline.worker.claim import claim_next
-from order_pipeline.worker.classify import classify_status
+from order_pipeline.worker.classify import PERMANENT_OUTCOMES, TRANSIENT_OUTCOMES, classify_status
 from order_pipeline.worker.counters import WorkerCounters
 from order_pipeline.worker.deps import DepCaps
 from order_pipeline.worker.finalize import (
@@ -413,6 +413,10 @@ def test_business_4xx_fails_order_no_retry(session_factory: sessionmaker[Session
 
 
 def test_429_retries_same_stored_key(session_factory: sessionmaker[Session]) -> None:
+    """Busy 429 stays transient: retry, same stored key, order not failed."""
+    assert classify_status(429) == "http_429"
+    assert "http_429" in TRANSIENT_OUTCOMES
+    assert "http_429" not in PERMANENT_OUTCOMES
     order_id, item_id, stored_key = _seed_confirm(session_factory)
     now = datetime.now(UTC)
     settings = _settings()

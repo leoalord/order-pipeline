@@ -3,18 +3,53 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from fastapi import FastAPI
 
-from order_pipeline.restaurant.quote import quote_accept
+from order_pipeline.restaurant.quote import quiet_cook_s, quote_accept
 from order_pipeline.restaurant.settings import RSIMSettings
 from order_pipeline.restaurant.status import kitchen_status
 from order_pipeline.sim.app import create_sim_app
-from order_pipeline.sim.core import Quote, SimCore
+from order_pipeline.sim.core import Quote, QuoteError, SimCore
 from order_pipeline.sim.faults import FaultState
-from order_pipeline.sim.ledger import EffectLedger
+from order_pipeline.sim.ledger import Effect, EffectLedger
+
+
+def _occupancy(
+    ledger: EffectLedger,
+    now: datetime,
+    *,
+    cook_s: dict[str, float],
+    extra_item_s: float,
+) -> list[tuple[datetime, datetime]]:
+    windows: list[tuple[datetime, datetime]] = []
+    for effect in ledger.list_effects():
+        if effect.estimated_ready_at <= now:
+            continue
+        cook = _effect_cook_s(effect, cook_s=cook_s, extra_item_s=extra_item_s)
+        start = effect.estimated_ready_at - timedelta(seconds=cook)
+        windows.append((start, effect.estimated_ready_at))
+    return windows
+
+
+def _effect_cook_s(
+    effect: Effect,
+    *,
+    cook_s: dict[str, float],
+    extra_item_s: float,
+) -> float:
+    raw = effect.payload.get("quiet_cook_s")
+    if isinstance(raw, int | float) and not isinstance(raw, bool):
+        return float(raw)
+    items = effect.payload.get("items")
+    if isinstance(items, list) and items and all(isinstance(item, str) for item in items):
+        try:
+            return quiet_cook_s(items, cook_s, extra_item_s)
+        except QuoteError:
+            return 0.0
+    return 0.0
 
 
 def build_app(
@@ -25,15 +60,50 @@ def build_app(
 ) -> FastAPI:
     cook_s = settings.cook_s.as_map()
     extra_item_s = settings.extra_item_s
+    ledger = EffectLedger(settings.ledger_path)
 
     def quote(body: dict[str, Any], now: datetime) -> Quote:
-        return quote_accept(body, now, cook_s=cook_s, extra_item_s=extra_item_s)
+        return quote_accept(
+            body,
+            now,
+            cook_s=cook_s,
+            extra_item_s=extra_item_s,
+            pans=settings.kitchen_pans,
+            busy_multiple=settings.busy_multiple,
+            rail_fuse=settings.rail_fuse,
+            occupancy=_occupancy(ledger, now, cook_s=cook_s, extra_item_s=extra_item_s),
+        )
+
+    def status_at(
+        *,
+        accepted_at: datetime,
+        estimated_ready_at: datetime,
+        now: datetime,
+        payload: dict[str, Any],
+    ) -> str:
+        cook = 0.0
+        raw = payload.get("quiet_cook_s")
+        if isinstance(raw, int | float) and not isinstance(raw, bool):
+            cook = float(raw)
+        else:
+            items = payload.get("items")
+            if isinstance(items, list) and items and all(isinstance(item, str) for item in items):
+                try:
+                    cook = quiet_cook_s(items, cook_s, extra_item_s)
+                except QuoteError:
+                    cook = 0.0
+        return kitchen_status(
+            accepted_at=accepted_at,
+            estimated_ready_at=estimated_ready_at,
+            now=now,
+            quiet_cook_s=cook,
+        )
 
     core = SimCore(
-        ledger=EffectLedger(settings.ledger_path),
+        ledger=ledger,
         faults=FaultState(now_fn=now_fn),
         quote=quote,
-        status_at=kitchen_status,
+        status_at=status_at,
         flaky_5xx_pct=settings.flaky_5xx_pct,
         flaky_drop_pct=settings.flaky_drop_pct,
         now_fn=now_fn,

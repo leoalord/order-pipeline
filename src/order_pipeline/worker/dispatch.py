@@ -84,11 +84,15 @@ class CourierHandlers:
         ticket_id = body["ticket_id"]
         raw_eta = body["estimated_ready_at"]
         eta = parse_ready_at(raw_eta)
-        ticket = {
+        ticket: dict[str, Any] = {
             "ticket_id": ticket_id,
             "estimated_ready_at": raw_eta,
             "accept_key": claimed.idempotency_key,
         }
+        for name in ("accepted_at", "service_started_at"):
+            raw = body.get(name)
+            if isinstance(raw, str) and raw:
+                ticket[name] = raw
         return HandlerResult(
             outcome="ok",
             transition=GuardedTransition(

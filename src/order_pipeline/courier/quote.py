@@ -1,6 +1,6 @@
-"""Trip-band quote: draw near/mid/far at dispatch; estimated_ready_at = now + trip.
+"""Trip-band quote: draw near/mid/far at dispatch; rail wait extends the trip.
 
-Fleet wait extends this later — it must not replace it.
+estimated_ready_at = now + rail_wait + trip. Fleet size is parallelism, not a bouncer.
 """
 
 from __future__ import annotations
@@ -12,9 +12,16 @@ from datetime import datetime, timedelta
 from typing import Any, Literal
 
 from order_pipeline.sim.core import Quote, QuoteError
+from order_pipeline.sim.rail import (
+    Occupancy,
+    exceeds_busy,
+    quoted_wait_s,
+    rail_wait_s,
+)
 
 TripBand = Literal["near", "mid", "far"]
 TRIP_BANDS: tuple[TripBand, ...] = ("near", "mid", "far")
+BUSY_DETAIL = "courier busy"
 
 
 def trip_seconds(band: str, trip_s: Mapping[str, float]) -> float:
@@ -45,14 +52,27 @@ def quote_dispatch(
     now: datetime,
     *,
     trip_s: Mapping[str, float],
+    fleet_size: int = 8,
+    busy_multiple: int = 3,
+    occupancy: Occupancy = (),
 ) -> Quote:
     band = draw_band(body)
     trip = trip_seconds(band, trip_s)
-    payload: dict[str, Any] = {"band": band}
+    payload: dict[str, Any] = {"band": band, "trip_s": trip}
     extras = {key: value for key, value in body.items() if key != "band"}
     if extras:
         payload["request"] = extras
+    in_flight = list(occupancy)
+    wait = rail_wait_s(now, parallelism=fleet_size, occupancy=in_flight)
+    quoted = quoted_wait_s(wait, trip)
+    if exceeds_busy(quoted_wait=quoted, service_s=trip, busy_multiple=busy_multiple):
+        return Quote(
+            estimated_ready_at=now + timedelta(seconds=quoted),
+            payload=payload,
+            reject_status=429,
+            reject_detail=BUSY_DETAIL,
+        )
     return Quote(
-        estimated_ready_at=now + timedelta(seconds=trip),
+        estimated_ready_at=now + timedelta(seconds=quoted),
         payload=payload,
     )

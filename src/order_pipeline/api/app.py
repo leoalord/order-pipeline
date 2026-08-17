@@ -3,11 +3,13 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
+from order_pipeline.api.door import CohortRejects, DoorCap
 from order_pipeline.api.schemas import OrderResponse, PlaceOrderRequest, SnapshotResponse
 from order_pipeline.api.settings import APISettings
 from order_pipeline.api.snapshot import build_snapshot, fetch_ledger_counts
@@ -25,6 +27,8 @@ from order_pipeline.models import Order
 settings = APISettings()
 engine: Engine = create_engine(settings.database_url)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+door = DoorCap(settings.accept_concurrency)
+door_rejects = CohortRejects()
 
 app = FastAPI(title="Order Pipeline API")
 
@@ -64,8 +68,8 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/orders", status_code=201)
-def post_orders(body: PlaceOrderRequest, idempotency_key: PlaceKeyHeader) -> OrderResponse:
+def _commit_place(body: PlaceOrderRequest, idempotency_key: str) -> OrderResponse:
+    """Durable accept. Runs in a thread so the event loop can still 429 the door."""
     fingerprint = body_fingerprint(items=body.items, cohort_id=body.cohort_id)
     try:
         with SessionLocal.begin() as session:
@@ -99,6 +103,20 @@ def post_orders(body: PlaceOrderRequest, idempotency_key: PlaceKeyHeader) -> Ord
                     status_code=409,
                     detail="Idempotency-Key reused with a different body",
                 ) from conflict
+        raise RuntimeError("place-key unique violation without a replay")
+
+
+@app.post("/orders", status_code=201)
+async def post_orders(body: PlaceOrderRequest, idempotency_key: PlaceKeyHeader) -> OrderResponse:
+    # Async so a full door can 429 on the event loop without waiting for a
+    # threadpool slot. Kitchen/courier 429s are a different brake (order exists).
+    if not door.admit():
+        door_rejects.add(body.cohort_id if body.cohort_id is not None else DEFAULT_COHORT_ID)
+        raise HTTPException(status_code=429, detail="door busy")
+    try:
+        return await run_in_threadpool(_commit_place, body, idempotency_key)
+    finally:
+        door.release()
 
 
 @app.get("/snapshot")
@@ -123,6 +141,7 @@ def get_snapshot(
             ledger_counts=(restaurant_counts, courier_counts),
             order_id=order_id,
             ledgers_ok=restaurant_ok and courier_ok,
+            door_429s=door_rejects.rejected(cohort),
         )
 
 

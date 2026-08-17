@@ -59,8 +59,10 @@ def test_dispatch_returns_ticket_under_two_seconds(client: TestClient) -> None:
     assert response.status_code == 200, response.text
     body = response.json()
     assert "ticket_id" in body
+    assert body["accepted_at"]
     assert body["estimated_ready_at"]
     assert body["status"] == "en_route"
+    assert body["service_started_at"]
     assert elapsed < 2.0
 
 
@@ -103,6 +105,32 @@ def test_poll_assigned_en_route_then_delivered(client: TestClient, clock: Mutabl
     clock.now = eta + timedelta(seconds=1)
     delivered = client.get(f"/tickets/{ticket_id}")
     assert delivered.json()["status"] == "delivered"
+
+
+def test_second_dispatch_waits_when_the_only_bike_is_busy(
+    tmp_path: Path, clock: MutableClock
+) -> None:
+    settings = CSIMSettings(
+        ledger_path=tmp_path / "one-bike.sqlite",
+        flaky_5xx_pct=0.0,
+        flaky_drop_pct=0.0,
+        fleet_size=1,
+    )
+    app = build_app(settings, now_fn=clock, blackout_hang_s=0.0)
+    with TestClient(app) as client:
+        first = _dispatch(client, "near", f"bike-1-{uuid.uuid4()}")
+        assert first.status_code == 200, first.text
+        assert first.json()["status"] == "en_route"
+        second = _dispatch(client, "near", f"bike-2-{uuid.uuid4()}")
+        assert second.status_code == 200, second.text
+        assert second.json()["status"] == "assigned"
+        first_eta = datetime.fromisoformat(
+            first.json()["estimated_ready_at"].replace("Z", "+00:00")
+        )
+        second_start = datetime.fromisoformat(
+            second.json()["service_started_at"].replace("Z", "+00:00")
+        )
+        assert second_start == first_eta
 
 
 def test_five_xx_before_writes_no_ledger_row(client: TestClient) -> None:

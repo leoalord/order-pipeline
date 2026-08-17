@@ -19,7 +19,7 @@ class TripTimes(BaseModel):
 
 
 class CSIMSettings(BaseSettings):
-    """Complete at first appearance, including dormant fleet / 3× / trip / flaky knobs."""
+    """Courier knobs. Fleet size is parallelism; 3× busy is live per trip band."""
 
     model_config = SettingsConfigDict(env_prefix="CSIM_", env_nested_delimiter="__")
 

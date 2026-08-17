@@ -71,7 +71,7 @@ def _dashboard_snapshot(
     return body
 
 
-def test_dashboard_serves_spa_and_stub_control() -> None:
+def test_dashboard_serves_spa_and_control_load_group() -> None:
     home = _http("GET", f"{DASHBOARD_URL}/")
     assert home.status_code == 200, home.text
     html = home.text
@@ -83,6 +83,13 @@ def test_dashboard_serves_spa_and_stub_control() -> None:
     home_src = _http("GET", f"{DASHBOARD_URL}/src/HomePage.tsx")
     assert home_src.status_code == 200, home_src.text
     assert "STAGE_LABELS" in home_src.text
+    assert "queued" in home_src.text
+    assert "cooking" in home_src.text
+    assert "waiting for" in home_src.text
+    assert "accept_reject" in home_src.text
+    assert "http_429s" in home_src.text
+    assert "parked_list" in home_src.text
+    assert "oldest_open" in home_src.text
     snap_src = _http("GET", f"{DASHBOARD_URL}/src/snapshot.ts")
     assert snap_src.status_code == 200, snap_src.text
     for label in STAGE_NAMES:
@@ -90,7 +97,11 @@ def test_dashboard_serves_spa_and_stub_control() -> None:
     control_src = _http("GET", f"{DASHBOARD_URL}/src/ControlPage.tsx")
     assert control_src.status_code == 200, control_src.text
     assert "Control" in control_src.text
-    assert "button" not in control_src.text.lower()
+    assert "/loadgen" in control_src.text
+    assert "/calibrate" in control_src.text
+    assert "/scenario/steady" in control_src.text
+    assert "/scenario/rush" in control_src.text
+    assert "blackout" not in control_src.text.lower()
 
 
 def test_dashboard_proxy_snapshot_and_reserved_sim_paths() -> None:
@@ -107,7 +118,10 @@ def test_dashboard_proxy_snapshot_and_reserved_sim_paths() -> None:
     assert csim.json() == {"status": "ok"}
     compose = (REPO_ROOT / "docker-compose.yml").read_text()
     assert "LOADGEN_PROXY_TARGET: http://loadgen:8090" in compose
-    assert "\n  loadgen:" not in compose
+    assert "\n  loadgen:" in compose
+    loadgen = _http("GET", f"{DASHBOARD_URL}/loadgen/health")
+    assert loadgen.status_code == 200, loadgen.text
+    assert loadgen.json() == {"status": "ok"}
 
 
 def test_one_order_walks_every_stage_on_slash_cards() -> None:

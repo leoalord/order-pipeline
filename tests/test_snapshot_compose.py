@@ -39,6 +39,15 @@ REQUIRED_FIELDS = (
     "state_vs_last_order_events_mismatches",
     "currently_leased",
     "trace",
+    "accept_reject",
+    "backlog",
+    "retry_rate",
+    "oldest_open",
+    "http_429s",
+    "stretching_etas",
+    "parked_list",
+    "sim_http",
+    "no_progress_beyond_threshold",
 )
 
 
