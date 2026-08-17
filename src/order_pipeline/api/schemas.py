@@ -87,7 +87,7 @@ class SnapshotResponse(BaseModel):
     e2e_latency_s: E2eLatency
     conservation: Conservation
     duplicate_attempts: int
-    duplicate_effects: int
+    duplicate_effects: int | None
     startup_scan: int
     invalid_transitions: int
     state_vs_last_order_events_mismatches: int

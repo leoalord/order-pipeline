@@ -12,6 +12,7 @@ from order_pipeline.api.snapshot import (
     STAGE_NAMES,
     build_snapshot,
     duplicate_effects_from_ledgers,
+    fetch_ledger_counts,
     order_id_from_ledger_key,
     percentile,
 )
@@ -47,6 +48,24 @@ def test_duplicate_effects_count_ledger_extras_for_cohort_only() -> None:
     assert duplicate_effects_from_ledgers([restaurant, courier], {in_cohort}) == 1
     assert duplicate_effects_from_ledgers([restaurant, courier], {other}) == 3
     assert order_id_from_ledger_key(confirm_idempotency_key(in_cohort)) == in_cohort
+
+
+def test_duplicate_effects_counts_two_keys_for_the_same_order() -> None:
+    """Minting a new retry key is the real duplicate; per-key n-1 cannot see it."""
+    order_id = uuid.uuid4()
+    restaurant = {
+        confirm_idempotency_key(order_id): 1,
+        f"({order_id}, confirm-retry)": 1,
+    }
+    courier = {dispatch_idempotency_key(order_id): 1}
+    assert duplicate_effects_from_ledgers([restaurant, courier], {order_id}) == 1
+    assert (
+        duplicate_effects_from_ledgers(
+            [{confirm_idempotency_key(order_id): 1}, {dispatch_idempotency_key(order_id): 1}],
+            {order_id},
+        )
+        == 0
+    )
 
 
 def test_snapshot_fields_cohort_filter_and_trace_null_attempts(
@@ -204,3 +223,27 @@ def test_invalid_transition_events_are_counted(session_factory: sessionmaker[Ses
         session.flush()
         snap = build_snapshot(session, cohort_id=cohort, now=now, ledger_counts=())
     assert snap.invalid_transitions == 1
+
+
+def test_fetch_ledger_counts_unreachable_is_not_ok() -> None:
+    counts, ok = fetch_ledger_counts("http://127.0.0.1:1", timeout_s=0.2)
+    assert ok is False
+    assert counts == {}
+
+
+def test_snapshot_duplicate_effects_none_when_ledgers_unavailable(
+    session_factory: sessionmaker[Session],
+) -> None:
+    cohort = uuid.uuid4()
+    now = datetime.now(UTC)
+    with session_factory.begin() as session:
+        _place(session, cohort_id=cohort)
+        snap = build_snapshot(
+            session,
+            cohort_id=cohort,
+            now=now,
+            ledger_counts=(),
+            ledgers_ok=False,
+        )
+    assert snap.duplicate_effects is None
+    assert snap.conservation.residual == 0

@@ -140,6 +140,7 @@ class KitchenHandlers:
                 )
             )
         if claimed.order_state == "being_prepared" and status == "ready":
+            # Dwell so GET and `/` can observe ready. Dispatch at now skips the card.
             return HandlerResult(
                 outcome="ok",
                 transition=GuardedTransition(
@@ -151,7 +152,8 @@ class KitchenHandlers:
                     NextWork(
                         work_type=DISPATCH_WORK_TYPE,
                         idempotency_key=dispatch_idempotency_key(claimed.order_id),
-                        next_attempt_at=self._now(),
+                        next_attempt_at=self._now()
+                        + timedelta(seconds=self.settings.poll_interval_s),
                     ),
                 ),
                 result_payload=payload,

@@ -7,10 +7,7 @@ import uuid
 
 import httpx
 import pytest
-from sqlalchemy import select
-from sqlalchemy.orm import Session, sessionmaker
 
-from order_pipeline.models import OrderEvent
 from order_pipeline.worker.dispatch import dispatch_idempotency_key
 from tests.sim_admin import mix_off
 
@@ -28,7 +25,7 @@ EXPECTED = (
 )
 
 
-def test_chips_walks_placed_through_delivered(session_factory: sessionmaker[Session]) -> None:
+def test_chips_walks_placed_through_delivered() -> None:
     mix_off()
     place_key = f"walk-delivered-{uuid.uuid4()}"
     try:
@@ -73,19 +70,8 @@ def test_chips_walks_placed_through_delivered(session_factory: sessionmaker[Sess
         )
 
     elapsed_s = time.monotonic() - started
-    if "ready" not in seen and "out_for_delivery" in seen:
-        with session_factory() as session:
-            ready_event = session.scalars(
-                select(OrderEvent).where(
-                    OrderEvent.order_id == uuid.UUID(str(order_id)),
-                    OrderEvent.to_state == "ready",
-                    OrderEvent.applied.is_(True),
-                )
-            ).one_or_none()
-        assert ready_event is not None, seen
-        seen.insert(seen.index("out_for_delivery"), "ready")
-
     after_ready_s = (time.monotonic() - ready_at) if ready_at is not None else None
+    assert "ready" in seen, f"seen={seen} elapsed={elapsed_s:.1f}s — ready must be GET-visible"
     assert tuple(seen) == EXPECTED, (
         f"seen={seen} elapsed={elapsed_s:.1f}s after_ready={after_ready_s}"
     )

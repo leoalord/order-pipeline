@@ -65,7 +65,7 @@ export type Snapshot = {
   e2e_latency_s: E2eLatency;
   conservation: Conservation;
   duplicate_attempts: number;
-  duplicate_effects: number;
+  duplicate_effects: number | null;
   startup_scan: number;
   invalid_transitions: number;
   state_vs_last_order_events_mismatches: number;

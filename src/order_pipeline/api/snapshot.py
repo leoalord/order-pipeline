@@ -64,14 +64,22 @@ def duplicate_effects_from_ledgers(
     ledger_counts: Sequence[Mapping[str, int]],
     cohort_order_ids: set[UUID],
 ) -> int:
-    """Extra sim-ledger rows per key for this cohort. Not a Postgres count."""
+    """Extra sim-ledger rows per order in this cohort, per ledger.
+
+    The ledger primary key is the exact idempotency key, so counting
+    ``n - 1`` per key can never see two tickets under two retry keys.
+    Group by order_id inside each sim instead. One confirm and one
+    dispatch in *different* ledgers is still zero extras.
+    """
     extra = 0
     for counts in ledger_counts:
+        per_order: dict[UUID, int] = {}
         for key, n in counts.items():
             order_id = order_id_from_ledger_key(key)
             if order_id is None or order_id not in cohort_order_ids:
                 continue
-            extra += max(0, int(n) - 1)
+            per_order[order_id] = per_order.get(order_id, 0) + int(n)
+        extra += sum(max(0, total - 1) for total in per_order.values())
     return extra
 
 
@@ -91,24 +99,27 @@ def percentile(values: Sequence[float], p: float) -> float | None:
     return ordered[lo] * (1.0 - weight) + ordered[hi] * weight
 
 
-def fetch_ledger_counts(base_url: str, *, timeout_s: float = 2.0) -> dict[str, int]:
-    """GET /admin/ledger from one sim. Unreachable sims contribute no effects."""
+def fetch_ledger_counts(base_url: str, *, timeout_s: float = 2.0) -> tuple[dict[str, int], bool]:
+    """GET /admin/ledger from one sim. ``ok`` is False when the sim is unreachable.
+
+    Callers must not treat a failed fetch as duplicate_effects = 0.
+    """
     try:
         response = httpx.get(f"{base_url.rstrip('/')}/admin/ledger", timeout=timeout_s)
         response.raise_for_status()
     except httpx.HTTPError:
-        return {}
+        return {}, False
     body = response.json()
     if not isinstance(body, dict):
-        return {}
+        return {}, False
     raw = body.get("counts")
     if not isinstance(raw, dict):
-        return {}
+        return {}, False
     counts: dict[str, int] = {}
     for key, value in raw.items():
         if isinstance(value, int) and not isinstance(value, bool):
             counts[str(key)] = value
-    return counts
+    return counts, True
 
 
 def _aware(value: datetime) -> datetime:
@@ -128,6 +139,7 @@ def build_snapshot(
     now: datetime,
     ledger_counts: Sequence[Mapping[str, int]],
     order_id: UUID | None = None,
+    ledgers_ok: bool = True,
 ) -> SnapshotResponse:
     """Assemble the snapshot from Postgres + already-fetched sim ledgers. No HTTP here."""
     orders = list(session.scalars(select(Order).where(Order.cohort_id == cohort_id)))
@@ -163,9 +175,9 @@ def build_snapshot(
             failed += 1
 
     accepted = len(orders)
-    in_flight = accepted - delivered - cancelled - failed
     parked_order_ids = {item.order_id for item in work_items if item.status == "parked"}
     in_flight_ids = {order.id for order in orders if order.state not in TERMINAL_STATES}
+    in_flight = len(in_flight_ids)
     parked_outside = len(parked_order_ids - in_flight_ids)
     residual = accepted - delivered - cancelled - failed - in_flight + parked_outside
 
@@ -254,7 +266,9 @@ def build_snapshot(
             residual=residual,
         ),
         duplicate_attempts=duplicate_attempts,
-        duplicate_effects=duplicate_effects_from_ledgers(ledger_counts, cohort_order_ids),
+        duplicate_effects=(
+            duplicate_effects_from_ledgers(ledger_counts, cohort_order_ids) if ledgers_ok else None
+        ),
         startup_scan=sum(1 for order in orders if order.id not in orders_with_work),
         invalid_transitions=invalid_transitions,
         state_vs_last_order_events_mismatches=mismatches,

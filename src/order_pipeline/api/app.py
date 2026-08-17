@@ -113,8 +113,8 @@ def get_snapshot(
     """
     cohort = cohort_id if cohort_id is not None else DEFAULT_COHORT_ID
     now = datetime.now(UTC)
-    restaurant_counts = fetch_ledger_counts(settings.restaurant_admin_url)
-    courier_counts = fetch_ledger_counts(settings.courier_admin_url)
+    restaurant_counts, restaurant_ok = fetch_ledger_counts(settings.restaurant_admin_url)
+    courier_counts, courier_ok = fetch_ledger_counts(settings.courier_admin_url)
     with SessionLocal() as session:
         return build_snapshot(
             session,
@@ -122,6 +122,7 @@ def get_snapshot(
             now=now,
             ledger_counts=(restaurant_counts, courier_counts),
             order_id=order_id,
+            ledgers_ok=restaurant_ok and courier_ok,
         )
 
 
