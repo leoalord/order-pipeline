@@ -50,7 +50,9 @@ def _core(
         accepted_at: datetime,
         estimated_ready_at: datetime,
         now: datetime,
+        payload: dict[str, Any],
     ) -> str:
+        _ = accepted_at, payload
         return "ready" if now >= estimated_ready_at else "cooking"
 
     return SimCore(

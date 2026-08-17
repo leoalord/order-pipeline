@@ -19,7 +19,12 @@ from order_pipeline.worker.chassis import Worker
 from order_pipeline.worker.claim import claim_next
 from order_pipeline.worker.counters import WorkerCounters
 from order_pipeline.worker.finalize import CAUSE_CONFIRM_DEADLINE, finalize_claim
-from order_pipeline.worker.kitchen import KitchenHandlers, parse_ready_at, poll_cook_idempotency_key
+from order_pipeline.worker.kitchen import (
+    KitchenHandlers,
+    first_cook_poll_at,
+    parse_ready_at,
+    poll_cook_idempotency_key,
+)
 from order_pipeline.worker.plugin import (
     ClaimedWork,
     GuardedTransition,
@@ -354,6 +359,170 @@ def test_poll_exhaustion_keeps_cooking_started_then_parks(
         assert parked_order.state == "being_prepared"
         assert item.status == "parked"
         assert item.park_reason == "poll_budget_exhausted"
+        event = session.scalars(
+            select(OrderEvent).where(
+                OrderEvent.order_id == order_id,
+                OrderEvent.cause == "cooking_started",
+                OrderEvent.applied.is_(True),
+            )
+        ).one()
+        assert event.to_state == "being_prepared"
+
+
+def test_first_cook_poll_at_queued_vs_already_cooking() -> None:
+    now = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
+    eta = now + timedelta(seconds=50)
+    pan_at = now + timedelta(seconds=25)
+    assert (
+        first_cook_poll_at(
+            now=now,
+            estimated_ready_at=eta,
+            service_started_at=pan_at,
+            poll_interval_s=3.0,
+        )
+        == pan_at
+    )
+    assert first_cook_poll_at(
+        now=now,
+        estimated_ready_at=eta,
+        service_started_at=now,
+        poll_interval_s=3.0,
+    ) == now + timedelta(seconds=3)
+    # Pre-rail clients that omit service_started_at still poll at ETA.
+    assert (
+        first_cook_poll_at(
+            now=now,
+            estimated_ready_at=eta,
+            service_started_at=None,
+            poll_interval_s=3.0,
+        )
+        == eta
+    )
+
+
+def _seed_confirmed_poll(
+    factory: sessionmaker[Session],
+    *,
+    now: datetime,
+    worker_id: str,
+    payload: dict[str, Any],
+) -> tuple[uuid.UUID, uuid.UUID, ClaimedWork]:
+    with factory.begin() as session:
+        order = place_order(
+            session,
+            place_key=f"cook-map-{uuid.uuid4()}",
+            items=["burrito"],
+            cohort_id=None,
+            ttl_hours=TTL_HOURS,
+            now=now,
+        )
+        order.state = "confirmed"
+        order.version += 1
+        confirm = session.scalars(select(WorkItem).where(WorkItem.order_id == order.id)).one()
+        confirm.status = "completed"
+        confirm.next_attempt_at = None
+        poll = WorkItem(
+            order_id=order.id,
+            work_type="poll_cook",
+            status="pending",
+            idempotency_key=poll_cook_idempotency_key(order.id),
+            attempt_count=0,
+            next_attempt_at=now,
+            payload=payload,
+        )
+        session.add(poll)
+        session.flush()
+        claimed = _claim(session, poll.id, now=now, worker_id=worker_id, work_types=("poll_cook",))
+        assert claimed is not None
+        return order.id, poll.id, claimed
+
+
+def test_poll_cook_queued_stays_confirmed(
+    db_engine: Engine, session_factory: sessionmaker[Session]
+) -> None:
+    now = datetime.now(UTC)
+    worker_id = "kitchen-queued"
+    pan_at = now + timedelta(seconds=20)
+    raw_eta = (now + timedelta(seconds=45)).isoformat().replace("+00:00", "Z")
+    raw_start = pan_at.isoformat().replace("+00:00", "Z")
+    order_id, item_id, claimed = _seed_confirmed_poll(
+        session_factory,
+        now=now,
+        worker_id=worker_id,
+        payload={
+            "ticket_id": "ticket-queued",
+            "estimated_ready_at": raw_eta,
+            "service_started_at": raw_start,
+            "accept_key": confirm_idempotency_key(uuid.uuid4()),
+        },
+    )
+    restaurant = FakeRestaurantClient(poll_body={"status": "queued", "ticket_id": "ticket-queued"})
+    kitchen = KitchenHandlers(_settings(), restaurant, now_fn=lambda: now)
+    worker = Worker(
+        _settings(),
+        db_engine,
+        handlers={"poll_cook": kitchen.poll_cook},
+        worker_id=worker_id,
+        now_fn=lambda: now,
+    )
+    asyncio.run(worker.process(claimed))
+
+    with session_factory() as session:
+        order = session.get(Order, order_id)
+        item = session.get(WorkItem, item_id)
+        assert order is not None
+        assert item is not None
+        assert order.state == "confirmed"
+        assert item.status == "pending"
+        assert item.next_attempt_at == pan_at
+        cooking_events = session.scalars(
+            select(OrderEvent).where(
+                OrderEvent.order_id == order_id,
+                OrderEvent.cause == "cooking_started",
+            )
+        ).all()
+        assert cooking_events == []
+
+
+def test_poll_cook_cooking_moves_to_being_prepared(
+    db_engine: Engine, session_factory: sessionmaker[Session]
+) -> None:
+    now = datetime.now(UTC)
+    worker_id = "kitchen-cooking"
+    eta = now + timedelta(seconds=25)
+    raw_eta = eta.isoformat().replace("+00:00", "Z")
+    accept_key = confirm_idempotency_key(uuid.uuid4())
+    order_id, item_id, claimed = _seed_confirmed_poll(
+        session_factory,
+        now=now,
+        worker_id=worker_id,
+        payload={
+            "ticket_id": "ticket-cooking",
+            "estimated_ready_at": raw_eta,
+            "accept_key": accept_key,
+        },
+    )
+    restaurant = FakeRestaurantClient(
+        poll_body={"status": "cooking", "ticket_id": "ticket-cooking"},
+    )
+    kitchen = KitchenHandlers(_settings(), restaurant, now_fn=lambda: now)
+    worker = Worker(
+        _settings(),
+        db_engine,
+        handlers={"poll_cook": kitchen.poll_cook},
+        worker_id=worker_id,
+        now_fn=lambda: now,
+    )
+    asyncio.run(worker.process(claimed))
+
+    with session_factory() as session:
+        order = session.get(Order, order_id)
+        item = session.get(WorkItem, item_id)
+        assert order is not None
+        assert item is not None
+        assert order.state == "being_prepared"
+        assert item.status == "pending"
+        assert item.next_attempt_at == eta
         event = session.scalars(
             select(OrderEvent).where(
                 OrderEvent.order_id == order_id,

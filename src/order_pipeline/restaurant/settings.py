@@ -19,7 +19,7 @@ class CookTimes(BaseModel):
 
 
 class RSIMSettings(BaseSettings):
-    """Complete at first appearance, including dormant pans / 3× / fuse knobs."""
+    """Kitchen knobs. Pans are parallelism; 3× busy and rail fuse are live."""
 
     model_config = SettingsConfigDict(env_prefix="RSIM_", env_nested_delimiter="__")
 

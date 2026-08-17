@@ -109,6 +109,14 @@ class EffectLedger:
             ).fetchall()
         return {str(row["idempotency_key"]): int(row["n"]) for row in rows}
 
+    def list_effects(self) -> list[Effect]:
+        """All effects, oldest accept first. Quote occupancy filters to not-yet-ready."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM effects ORDER BY accepted_at, ticket_id"
+            ).fetchall()
+        return [self._row_to_effect(row) for row in rows]
+
     @staticmethod
     def _row_to_effect(row: sqlite3.Row) -> Effect:
         payload = json.loads(str(row["payload_json"]))

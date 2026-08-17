@@ -1,4 +1,4 @@
-"""Trip-band quote math — near/mid/far seconds; estimated_ready_at = now + trip."""
+"""Trip-band quote math — near/mid/far seconds; rail wait extends the trip."""
 
 from datetime import UTC, datetime, timedelta
 
@@ -19,6 +19,8 @@ def test_eta_is_now_plus_trip() -> None:
     near = quote_dispatch({"band": "near"}, NOW, trip_s=TRIP)
     assert near.estimated_ready_at == NOW + timedelta(seconds=12)
     assert near.payload["band"] == "near"
+    assert near.payload["trip_s"] == 12.0
+    assert near.reject_status is None
 
     mid = quote_dispatch({"band": "mid"}, NOW, trip_s=TRIP)
     assert mid.estimated_ready_at == NOW + timedelta(seconds=20)
@@ -35,3 +37,67 @@ def test_draw_without_band_is_deterministic() -> None:
     assert first.payload == second.payload
     assert first.estimated_ready_at == second.estimated_ready_at
     assert first.payload["band"] in {"near", "mid", "far"}
+
+
+def test_fleet_wait_extends_trip_bike_9_is_not_a_429() -> None:
+    occupancy = [(NOW, NOW + timedelta(seconds=12))] * 8
+    quoted = quote_dispatch(
+        {"band": "near"},
+        NOW,
+        trip_s=TRIP,
+        fleet_size=8,
+        busy_multiple=3,
+        occupancy=occupancy,
+    )
+    assert quoted.reject_status is None
+    assert quoted.estimated_ready_at == NOW + timedelta(seconds=12 + 12)
+
+
+def test_in_progress_bike_uses_only_remaining_trip_time() -> None:
+    occupancy = [(NOW - timedelta(seconds=7), NOW + timedelta(seconds=5))]
+    quoted = quote_dispatch(
+        {"band": "near"},
+        NOW,
+        trip_s=TRIP,
+        fleet_size=1,
+        occupancy=occupancy,
+    )
+    assert quoted.reject_status is None
+    assert quoted.estimated_ready_at == NOW + timedelta(seconds=5 + 12)
+
+
+def test_courier_429_when_quoted_trip_exceeds_3x_that_band() -> None:
+    occupancy = [(NOW, NOW + timedelta(seconds=30))]
+    quoted = quote_dispatch(
+        {"band": "near"},
+        NOW,
+        trip_s=TRIP,
+        fleet_size=1,
+        busy_multiple=3,
+        occupancy=occupancy,
+    )
+    assert quoted.reject_status == 429
+    assert quoted.reject_detail == "courier busy"
+
+
+def test_courier_busy_is_per_band_not_global() -> None:
+    # Far's quiet trip is 35; wait 30 + 35 = 65 is not > 3×35=105.
+    occupancy = [(NOW, NOW + timedelta(seconds=30))]
+    far = quote_dispatch(
+        {"band": "far"},
+        NOW,
+        trip_s=TRIP,
+        fleet_size=1,
+        busy_multiple=3,
+        occupancy=occupancy,
+    )
+    assert far.reject_status is None
+    near = quote_dispatch(
+        {"band": "near"},
+        NOW,
+        trip_s=TRIP,
+        fleet_size=1,
+        busy_multiple=3,
+        occupancy=occupancy,
+    )
+    assert near.reject_status == 429

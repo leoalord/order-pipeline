@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import random
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
 from uuid import uuid4
 
@@ -28,6 +29,10 @@ class QuoteError(Exception):
 class Quote:
     estimated_ready_at: datetime
     payload: dict[str, Any]
+    # Set on new accepts only. Replay compares payload and ignores this — a later
+    # 3×/fuse 429 must not 409 or refuse a Stripe replay of an already-accepted key.
+    reject_status: int | None = None
+    reject_detail: str | None = None
 
 
 class QuoteFn(Protocol):
@@ -41,6 +46,7 @@ class StatusFn(Protocol):
         accepted_at: datetime,
         estimated_ready_at: datetime,
         now: datetime,
+        payload: dict[str, Any],
     ) -> str: ...
 
 
@@ -96,6 +102,9 @@ class SimCore:
         self._now = now_fn or _utc_now
         self._rng = rng or random.Random()
         self.blackout_hang_s = blackout_hang_s
+        # Quote reads current rail occupancy and insert reserves the chosen slot.
+        # Keep that read/quote/write sequence atomic across concurrent HTTP accepts.
+        self._accept_lock = threading.Lock()
 
     def ping(self) -> None:
         self.ledger.ping()
@@ -132,6 +141,10 @@ class SimCore:
         return self.ledger.counts_by_key()
 
     def accept(self, idempotency_key: str, body: dict[str, Any]) -> AcceptOutcome:
+        with self._accept_lock:
+            return self._accept_locked(idempotency_key, body)
+
+    def _accept_locked(self, idempotency_key: str, body: dict[str, Any]) -> AcceptOutcome:
         now = self._now()
         mode = self.faults.effective_mode(now)
         if mode is FaultMode.BLACKOUT:
@@ -152,6 +165,12 @@ class SimCore:
                 action="reject",
                 status_code=exc.status_code,
                 detail=exc.detail,
+            )
+        if quote.reject_status is not None:
+            return AcceptOutcome(
+                action="reject",
+                status_code=quote.reject_status,
+                detail=quote.reject_detail or "busy",
             )
 
         injected = mode if mode is not FaultMode.OFF else self._roll_mix()
@@ -249,9 +268,23 @@ class SimCore:
             accepted_at=effect.accepted_at,
             estimated_ready_at=effect.estimated_ready_at,
             now=now,
+            payload=effect.payload,
         )
-        return {
+        body: dict[str, Any] = {
             "ticket_id": effect.ticket_id,
+            "accepted_at": isoformat_z(effect.accepted_at),
             "estimated_ready_at": isoformat_z(effect.estimated_ready_at),
             "status": status,
         }
+        started = _service_started_at(effect)
+        if started is not None:
+            body["service_started_at"] = isoformat_z(started)
+        return body
+
+
+def _service_started_at(effect: Effect) -> datetime | None:
+    """Pan/bike start = ETA − quiet service. Derived from payload, not occupancy."""
+    raw = effect.payload.get("quiet_cook_s", effect.payload.get("trip_s"))
+    if not isinstance(raw, int | float) or isinstance(raw, bool):
+        return None
+    return effect.estimated_ready_at - timedelta(seconds=float(raw))

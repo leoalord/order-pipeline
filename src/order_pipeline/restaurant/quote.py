@@ -1,6 +1,6 @@
 """Quiet cook quote: slowest item + extra seconds per additional item.
 
-Rail wait extends this later — it must not replace it.
+Rail wait *extends* this — estimated_ready_at = now + rail_wait + quiet_cook.
 """
 
 from __future__ import annotations
@@ -11,6 +11,15 @@ from typing import Any
 
 from order_pipeline.menu import MAX_CART_ITEMS, MENU_ITEM_IDS
 from order_pipeline.sim.core import Quote, QuoteError
+from order_pipeline.sim.rail import (
+    Occupancy,
+    exceeds_busy,
+    exceeds_fuse,
+    quoted_wait_s,
+    rail_wait_s,
+)
+
+BUSY_DETAIL = "kitchen busy"
 
 
 def quiet_cook_s(
@@ -49,10 +58,32 @@ def quote_accept(
     *,
     cook_s: Mapping[str, float],
     extra_item_s: float,
+    pans: int = 20,
+    busy_multiple: int = 3,
+    rail_fuse: int = 80,
+    occupancy: Occupancy = (),
 ) -> Quote:
     items = parse_accept_items(body)
     cook = quiet_cook_s(items, cook_s, extra_item_s)
+    payload = {"items": items, "quiet_cook_s": cook}
+    in_flight = list(occupancy)
+    if exceeds_fuse(in_flight=len(in_flight), fuse=rail_fuse):
+        return Quote(
+            estimated_ready_at=now + timedelta(seconds=cook),
+            payload=payload,
+            reject_status=429,
+            reject_detail=BUSY_DETAIL,
+        )
+    wait = rail_wait_s(now, parallelism=pans, occupancy=in_flight)
+    quoted = quoted_wait_s(wait, cook)
+    if exceeds_busy(quoted_wait=quoted, service_s=cook, busy_multiple=busy_multiple):
+        return Quote(
+            estimated_ready_at=now + timedelta(seconds=quoted),
+            payload=payload,
+            reject_status=429,
+            reject_detail=BUSY_DETAIL,
+        )
     return Quote(
-        estimated_ready_at=now + timedelta(seconds=cook),
-        payload={"items": items},
+        estimated_ready_at=now + timedelta(seconds=quoted),
+        payload=payload,
     )

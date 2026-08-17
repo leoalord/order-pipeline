@@ -1,5 +1,6 @@
 /** Frozen GET /snapshot field names. Never rename. Cards on `/` bind to these. */
 
+/** Assignment names. confirmed = kitchen queued; being prepared = cooking (on a pan). */
 export const STAGE_LABELS = [
   "placed",
   "confirmed",
@@ -10,6 +11,12 @@ export const STAGE_LABELS = [
 ] as const;
 
 export type StageLabel = (typeof STAGE_LABELS)[number];
+
+/** Stable label seam on the existing `/` stage cards. No pipeline pane here. */
+export const STAGE_SEAMS: Partial<Record<StageLabel, string>> = {
+  confirmed: "queued — waiting for a pan",
+  "being prepared": "cooking — on a pan",
+};
 
 export type TerminalRates = {
   delivered: number;
@@ -58,6 +65,51 @@ export type OrderTrace = {
   attempts: TraceAttempt[];
 };
 
+export type AcceptReject = {
+  accepted: number;
+  rejected: number;
+};
+
+export type OldestOpen = {
+  age_s: number | null;
+  stage: string | null;
+};
+
+export type Http429s = {
+  door: number;
+  kitchen: number;
+  courier: number;
+};
+
+export type StretchingEtas = {
+  count: number;
+  max_stretch_s: number | null;
+};
+
+export type ParkedRow = {
+  order_id: string;
+  work_type: string;
+  owner: string | null;
+  reason: string | null;
+  next_action: string | null;
+};
+
+export type SimHttpLane = {
+  requests_per_min: number;
+  latency_p50_s: number | null;
+  latency_p95_s: number | null;
+};
+
+export type SimHttp = {
+  restaurant: SimHttpLane;
+  courier: SimHttpLane;
+};
+
+export type NoProgress = {
+  threshold_s: number;
+  count: number;
+};
+
 export type Snapshot = {
   cohort_id: string;
   stages: Record<string, number>;
@@ -71,9 +123,30 @@ export type Snapshot = {
   state_vs_last_order_events_mismatches: number;
   currently_leased: number;
   trace: OrderTrace | null;
+  accept_reject: AcceptReject;
+  backlog: Record<string, number>;
+  retry_rate: number;
+  oldest_open: OldestOpen;
+  http_429s: Http429s;
+  stretching_etas: StretchingEtas;
+  parked_list: ParkedRow[];
+  sim_http: SimHttp;
+  no_progress_beyond_threshold: NoProgress;
 };
 
 export const POLL_MS = 1000;
+
+export type LoadgenStatus = {
+  cohort_id: string;
+};
+
+export async function fetchLoadgenStatus(signal?: AbortSignal): Promise<LoadgenStatus> {
+  const response = await fetch("/loadgen/status", { signal });
+  if (!response.ok) {
+    throw new Error(`GET /loadgen/status ${response.status}`);
+  }
+  return (await response.json()) as LoadgenStatus;
+}
 
 export function snapshotUrl(opts?: { cohortId?: string; orderId?: string }): string {
   const base = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");

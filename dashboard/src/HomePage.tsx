@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 
 import {
+  fetchLoadgenStatus,
   fetchSnapshot,
   POLL_MS,
   STAGE_LABELS,
+  STAGE_SEAMS,
   type Snapshot,
 } from "./snapshot";
 
@@ -20,6 +22,7 @@ export function HomePage() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [orderId, setOrderId] = useState("");
+  const [cohortId, setCohortId] = useState<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -27,12 +30,17 @@ export function HomePage() {
 
     const poll = async () => {
       try {
+        // Each tab discovers the loadgen's current cohort independently. There is
+        // no cross-tab React state for New cohort to keep in sync.
+        const loadgen = await fetchLoadgenStatus(controller.signal);
         const body = await fetchSnapshot({
+          cohortId: loadgen.cohort_id,
           orderId: ORDER_ID_RE.test(orderId.trim()) ? orderId.trim() : undefined,
           signal: controller.signal,
         });
         if (!controller.signal.aborted) {
           setSnapshot(body);
+          setCohortId(loadgen.cohort_id);
           setError(null);
         }
       } catch (err) {
@@ -61,13 +69,21 @@ export function HomePage() {
   const e2e = snapshot?.e2e_latency_s;
   const conservation = snapshot?.conservation;
   const trace = snapshot?.trace;
+  const oldest = snapshot?.oldest_open;
+  const acceptReject = snapshot?.accept_reject;
+  const backlog = snapshot?.backlog;
+  const http429s = snapshot?.http_429s;
+  const stretching = snapshot?.stretching_etas;
+  const simHttp = snapshot?.sim_http;
+  const parked = snapshot?.parked_list ?? [];
+  const noProgress = snapshot?.no_progress_beyond_threshold;
 
   return (
     <main className="page">
       <h1>Watch</h1>
       <p className="lede">
         Live counts for this cohort. Cards refresh on their own; nothing places
-        orders from here.
+        orders from here. Cohort: {cohortId ?? "discovering…"}
       </p>
       {error ? <p className="error">{error}</p> : null}
 
@@ -75,14 +91,19 @@ export function HomePage() {
         <h2>Business</h2>
         <p className="pane-intro">
           The top row is how many orders sit in each happy-path stage{" "}
-          <em>right now</em>. Cancelled and failed are endings, not stages —
-          they show up in rates and conservation.
+          <em>right now</em>. Confirmed is kitchen <em>queued</em> (waiting for
+          a pan); being prepared is <em>cooking</em> (on a pan). Cancelled and
+          failed are endings, not stages — they show up in rates and
+          conservation.
         </p>
         <p className="group-label">in each stage now</p>
         <div className="card-grid stages">
           {STAGE_LABELS.map((label) => (
             <article className="card" key={label}>
               <h3>{label}</h3>
+              {STAGE_SEAMS[label] ? (
+                <p className="hint">{STAGE_SEAMS[label]}</p>
+              ) : null}
               <p className="metric">{fmt(stages?.[label])}</p>
             </article>
           ))}
@@ -124,6 +145,156 @@ export function HomePage() {
               <div>
                 <dt>p95</dt>
                 <dd>{fmt(e2e?.p95)}</dd>
+              </div>
+            </dl>
+          </article>
+          <article className="card">
+            <h3>oldest open</h3>
+            <p className="hint">
+              Age and stage of the oldest non-terminal order in this cohort.
+              Rises in a rush, then falls as the drain completes.
+            </p>
+            <dl>
+              <div>
+                <dt>age (s)</dt>
+                <dd>{fmt(oldest?.age_s)}</dd>
+              </div>
+              <div>
+                <dt>stage</dt>
+                <dd>{oldest?.stage ?? "—"}</dd>
+              </div>
+            </dl>
+          </article>
+        </div>
+      </section>
+
+      <section className="pane">
+        <h2>Pipeline</h2>
+        <p className="pane-intro">
+          Intake, work-item backlog, retries, counted 429s, stretching ETAs, and
+          per-sim HTTP. Same GET /snapshot keys the walk already polls.
+        </p>
+        <div className="card-grid">
+          <article className="card">
+            <h3>accept / reject</h3>
+            <p className="hint">
+              Accepted orders vs door 429s (no order row). Kitchen and courier
+              busy are a different no.
+            </p>
+            <dl>
+              <div>
+                <dt>accepted</dt>
+                <dd>{fmt(acceptReject?.accepted)}</dd>
+              </div>
+              <div>
+                <dt>rejected</dt>
+                <dd>{fmt(acceptReject?.rejected)}</dd>
+              </div>
+            </dl>
+          </article>
+          <article className="card">
+            <h3>backlog by work type</h3>
+            <p className="hint">
+              Pending + leased work items. Parked is not backlog.
+            </p>
+            <dl>
+              <div>
+                <dt>confirm</dt>
+                <dd>{fmt(backlog?.confirm)}</dd>
+              </div>
+              <div>
+                <dt>poll_cook</dt>
+                <dd>{fmt(backlog?.poll_cook)}</dd>
+              </div>
+              <div>
+                <dt>dispatch</dt>
+                <dd>{fmt(backlog?.dispatch)}</dd>
+              </div>
+              <div>
+                <dt>poll_ride</dt>
+                <dd>{fmt(backlog?.poll_ride)}</dd>
+              </div>
+            </dl>
+          </article>
+          <article className="card">
+            <h3>retry rate</h3>
+            <p className="metric">{fmt(snapshot?.retry_rate)}</p>
+            <p className="hint">
+              Fraction of attempts in the last 60s that are not the first
+              attempt on that work item.
+            </p>
+          </article>
+          <article className="card">
+            <h3>429s</h3>
+            <p className="hint">
+              Counted busy. Door = intake fuse. Kitchen / courier = quoted wait
+              &gt; 3× that ticket&apos;s quiet time.
+            </p>
+            <dl>
+              <div>
+                <dt>door</dt>
+                <dd>{fmt(http429s?.door)}</dd>
+              </div>
+              <div>
+                <dt>kitchen</dt>
+                <dd>{fmt(http429s?.kitchen)}</dd>
+              </div>
+              <div>
+                <dt>courier</dt>
+                <dd>{fmt(http429s?.courier)}</dd>
+              </div>
+            </dl>
+          </article>
+          <article className="card">
+            <h3>stretching ETAs</h3>
+            <p className="hint">
+              In-flight orders whose quoted wait exceeds quiet cook. The rush
+              beat is promises stretching, not ticket 21.
+            </p>
+            <dl>
+              <div>
+                <dt>count</dt>
+                <dd>{fmt(stretching?.count)}</dd>
+              </div>
+              <div>
+                <dt>max stretch (s)</dt>
+                <dd>{fmt(stretching?.max_stretch_s)}</dd>
+              </div>
+            </dl>
+          </article>
+          <article className="card">
+            <h3>restaurant HTTP</h3>
+            <p className="hint">Kitchen work: confirm and poll_cook.</p>
+            <dl>
+              <div>
+                <dt>req / min</dt>
+                <dd>{fmt(simHttp?.restaurant.requests_per_min)}</dd>
+              </div>
+              <div>
+                <dt>p50 (s)</dt>
+                <dd>{fmt(simHttp?.restaurant.latency_p50_s)}</dd>
+              </div>
+              <div>
+                <dt>p95 (s)</dt>
+                <dd>{fmt(simHttp?.restaurant.latency_p95_s)}</dd>
+              </div>
+            </dl>
+          </article>
+          <article className="card">
+            <h3>courier HTTP</h3>
+            <p className="hint">Dispatch and poll_ride.</p>
+            <dl>
+              <div>
+                <dt>req / min</dt>
+                <dd>{fmt(simHttp?.courier.requests_per_min)}</dd>
+              </div>
+              <div>
+                <dt>p50 (s)</dt>
+                <dd>{fmt(simHttp?.courier.latency_p50_s)}</dd>
+              </div>
+              <div>
+                <dt>p95 (s)</dt>
+                <dd>{fmt(simHttp?.courier.latency_p95_s)}</dd>
               </div>
             </dl>
           </article>
@@ -195,7 +366,51 @@ export function HomePage() {
               stay 0 on a clean walk.
             </p>
           </article>
+          <article className="card">
+            <h3>no progress beyond threshold</h3>
+            <p className="metric">{fmt(noProgress?.count)}</p>
+            <p className="hint">
+              In-flight orders whose last applied event is older than{" "}
+              {fmt(noProgress?.threshold_s)}s. Park is a work-item status, not a
+              stage.
+            </p>
+          </article>
         </div>
+        <article className="card parked">
+          <h3>parked list</h3>
+          <p className="hint">
+            Read-only. Owner, reason, and next action. Parked work is stalled,
+            not lost, and not a lifecycle stage.
+          </p>
+          {parked.length === 0 ? (
+            <p className="hint">None in this cohort.</p>
+          ) : (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>order</th>
+                    <th>work</th>
+                    <th>owner</th>
+                    <th>reason</th>
+                    <th>next action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {parked.map((row) => (
+                    <tr key={`${row.order_id}-${row.work_type}`}>
+                      <td>{row.order_id}</td>
+                      <td>{row.work_type}</td>
+                      <td>{row.owner ?? "—"}</td>
+                      <td>{row.reason ?? "—"}</td>
+                      <td>{row.next_action ?? "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </article>
         <article className="card trace">
           <h3>paste-an-ID trace</h3>
           <p className="hint">

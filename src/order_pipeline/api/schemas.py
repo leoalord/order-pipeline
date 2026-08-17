@@ -78,6 +78,51 @@ class OrderTrace(BaseModel):
     attempts: list[TraceAttempt]
 
 
+class AcceptReject(BaseModel):
+    accepted: int
+    rejected: int
+
+
+class OldestOpen(BaseModel):
+    age_s: float | None
+    stage: str | None
+
+
+class Http429s(BaseModel):
+    door: int
+    kitchen: int
+    courier: int
+
+
+class StretchingEtas(BaseModel):
+    count: int
+    max_stretch_s: float | None
+
+
+class ParkedRow(BaseModel):
+    order_id: UUID
+    work_type: str
+    owner: str | None
+    reason: str | None
+    next_action: str | None
+
+
+class SimHttpLane(BaseModel):
+    requests_per_min: float
+    latency_p50_s: float | None
+    latency_p95_s: float | None
+
+
+class SimHttp(BaseModel):
+    restaurant: SimHttpLane
+    courier: SimHttpLane
+
+
+class NoProgress(BaseModel):
+    threshold_s: float
+    count: int
+
+
 class SnapshotResponse(BaseModel):
     """Additive JSON. Field names are frozen once shipped — never rename."""
 
@@ -93,3 +138,12 @@ class SnapshotResponse(BaseModel):
     state_vs_last_order_events_mismatches: int
     currently_leased: int
     trace: OrderTrace | None
+    accept_reject: AcceptReject
+    backlog: dict[str, int]
+    retry_rate: float
+    oldest_open: OldestOpen
+    http_429s: Http429s
+    stretching_etas: StretchingEtas
+    parked_list: list[ParkedRow]
+    sim_http: SimHttp
+    no_progress_beyond_threshold: NoProgress

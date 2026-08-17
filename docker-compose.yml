@@ -90,8 +90,8 @@ services:
   worker:
     build: .
     command: ["worker"]
-    ports:
-      - "8083:8083"
+    # Health stays on container 8083 so compose --wait is real. Do not publish
+    # 8083 to the host — two replicas cannot both bind it. `ps -q worker` → 2.
     environment:
       SKIP_MIGRATIONS: "1"
       WORKER_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/order_pipeline
@@ -107,6 +107,8 @@ services:
       courier:
         condition: service_healthy
     restart: "no"
+    deploy:
+      replicas: 2
     healthcheck:
       test:
         [
@@ -120,14 +122,37 @@ services:
       retries: 20
       start_period: 5s
 
+  loadgen:
+    build: .
+    command: ["loadgen"]
+    ports:
+      - "8090:8090"
+    environment:
+      SKIP_MIGRATIONS: "1"
+      LOADGEN_API_BASE_URL: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health')",
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
   dashboard:
     build: ./dashboard
     ports:
       - "5173:5173"
     environment:
       # Vite *server* proxy wiring — not VITE_ client knobs. The browser talks
-      # same-origin `/snapshot` `/loadgen` `/rsim` `/csim`. Loadgen is reserved
-      # for dinner_rush; do not add that container here.
+      # same-origin `/snapshot` `/loadgen` `/rsim` `/csim`.
       API_PROXY_TARGET: http://api:8000
       LOADGEN_PROXY_TARGET: http://loadgen:8090
       RSIM_PROXY_TARGET: http://restaurant:8081
@@ -138,6 +163,8 @@ services:
       restaurant:
         condition: service_healthy
       courier:
+        condition: service_healthy
+      loadgen:
         condition: service_healthy
     healthcheck:
       test:
@@ -151,12 +178,6 @@ services:
       timeout: 5s
       retries: 30
       start_period: 10s
-
-  # Reserved host ports (later slices — do not bind them here):
-  #   loadgen    8090
-  #
-  # Second worker replica waits for a later slice so `docker compose ps -q worker`
-  # can return two ids. restart: "no" — restart: always deletes scenario 3's gap.
 
 volumes:
   postgres_data:

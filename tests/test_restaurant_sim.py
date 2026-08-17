@@ -5,15 +5,21 @@ from __future__ import annotations
 import time
 import uuid
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from order_pipeline.restaurant.app import build_app
+from order_pipeline.restaurant.quote import quote_accept
 from order_pipeline.restaurant.settings import RSIMSettings
+from order_pipeline.sim.core import Quote, SimCore
+from order_pipeline.sim.faults import FaultState
+from order_pipeline.sim.ledger import EffectLedger
 
 
 class MutableClock:
@@ -59,8 +65,10 @@ def test_accept_returns_ticket_under_two_seconds(client: TestClient) -> None:
     assert response.status_code == 200, response.text
     body = response.json()
     assert "ticket_id" in body
+    assert body["accepted_at"]
     assert body["estimated_ready_at"]
     assert body["status"] == "cooking"
+    assert body["service_started_at"]
     assert elapsed < 2.0
 
 
@@ -98,6 +106,112 @@ def test_poll_cooking_then_ready(client: TestClient, clock: MutableClock) -> Non
     clock.now = eta + timedelta(seconds=1)
     ready = client.get(f"/tickets/{ticket_id}")
     assert ready.json()["status"] == "ready"
+
+
+def test_second_ticket_queues_when_the_only_pan_is_busy(
+    tmp_path: Path, clock: MutableClock
+) -> None:
+    settings = RSIMSettings(
+        ledger_path=tmp_path / "one-pan.sqlite",
+        flaky_5xx_pct=0.0,
+        flaky_drop_pct=0.0,
+        kitchen_pans=1,
+        rail_fuse=80,
+    )
+    app = build_app(settings, now_fn=clock, blackout_hang_s=0.0)
+    with TestClient(app) as client:
+        first = _accept(client, ["burrito"], f"pan-1-{uuid.uuid4()}")
+        assert first.status_code == 200, first.text
+        assert first.json()["status"] == "cooking"
+        second = _accept(client, ["burrito"], f"pan-2-{uuid.uuid4()}")
+        assert second.status_code == 200, second.text
+        assert second.json()["status"] == "queued"
+        first_eta = datetime.fromisoformat(
+            first.json()["estimated_ready_at"].replace("Z", "+00:00")
+        )
+        second_start = datetime.fromisoformat(
+            second.json()["service_started_at"].replace("Z", "+00:00")
+        )
+        assert second_start == first_eta
+
+
+def test_concurrent_accepts_reserve_no_more_than_twenty_pans(
+    tmp_path: Path, clock: MutableClock
+) -> None:
+    ledger = EffectLedger(tmp_path / "concurrent-rail.sqlite")
+    cook_s = RSIMSettings().cook_s.as_map()
+
+    def quote(body: dict[str, Any], now: datetime) -> Quote:
+        occupancy = [
+            (effect.estimated_ready_at - timedelta(seconds=12), effect.estimated_ready_at)
+            for effect in ledger.list_effects()
+            if effect.estimated_ready_at > now
+        ]
+        # Make an unlocked read/quote/insert sequence race deterministically.
+        time.sleep(0.005)
+        return quote_accept(
+            body,
+            now,
+            cook_s=cook_s,
+            extra_item_s=5.0,
+            pans=20,
+            occupancy=occupancy,
+        )
+
+    core = SimCore(
+        ledger=ledger,
+        faults=FaultState(now_fn=clock),
+        quote=quote,
+        status_at=lambda **_kwargs: "cooking",
+        flaky_5xx_pct=0.0,
+        flaky_drop_pct=0.0,
+        now_fn=clock,
+    )
+
+    with ThreadPoolExecutor(max_workers=40) as pool:
+        outcomes = list(
+            pool.map(
+                lambda index: core.accept(f"concurrent-{index}", {"items": ["chips"]}),
+                range(40),
+            )
+        )
+    assert all(outcome.status_code == 200 for outcome in outcomes)
+
+    one_second_in = clock.now + timedelta(seconds=1)
+    active = 0
+    for effect in ledger.list_effects():
+        started_at = effect.estimated_ready_at - timedelta(seconds=12)
+        if started_at <= one_second_in < effect.estimated_ready_at:
+            active += 1
+    assert active == 20
+
+
+def test_busy_429_then_replay_of_earlier_key_still_succeeds(
+    tmp_path: Path, clock: MutableClock
+) -> None:
+    settings = RSIMSettings(
+        ledger_path=tmp_path / "busy.sqlite",
+        flaky_5xx_pct=0.0,
+        flaky_drop_pct=0.0,
+        kitchen_pans=1,
+        busy_multiple=3,
+        rail_fuse=80,
+    )
+    app = build_app(settings, now_fn=clock, blackout_hang_s=0.0)
+    with TestClient(app) as client:
+        first_key = f"busy-first-{uuid.uuid4()}"
+        first = _accept(client, ["burrito"], first_key)
+        assert first.status_code == 200, first.text
+        # Fill the 3× window: wait grows by 25s per extra burrito on one pan.
+        for i in range(2):
+            filled = _accept(client, ["burrito"], f"busy-fill-{i}-{uuid.uuid4()}")
+            assert filled.status_code == 200, filled.text
+        busy = _accept(client, ["burrito"], f"busy-no-{uuid.uuid4()}")
+        assert busy.status_code == 429, busy.text
+        replay = _accept(client, ["burrito"], first_key)
+        assert replay.status_code == 200, replay.text
+        assert replay.json()["ticket_id"] == first.json()["ticket_id"]
+        assert client.get("/admin/ledger").json()["counts"][first_key] == 1
 
 
 def test_five_xx_before_writes_no_ledger_row(client: TestClient) -> None:

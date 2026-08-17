@@ -154,3 +154,69 @@ dd {
   margin: 0.4rem 0 0;
   padding-left: 1.2rem;
 }
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+.card.parked table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.card.parked th,
+.card.parked td {
+  text-align: left;
+  padding: 0.35rem 0.5rem 0.35rem 0;
+  vertical-align: top;
+  font-variant-numeric: tabular-nums;
+}
+
+.card.parked th {
+  color: #5c564c;
+  font-weight: 650;
+}
+
+.control-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.6rem;
+  margin-bottom: 0.75rem;
+}
+
+.control-row button {
+  font: inherit;
+  padding: 0.4rem 0.85rem;
+  border: 1px solid #d7d0c4;
+  border-radius: 4px;
+  background: #fffdf8;
+  cursor: pointer;
+}
+
+.control-row button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.control-row .mult {
+  display: grid;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  color: #5c564c;
+}
+
+.control-row .mult input {
+  font: inherit;
+  width: 6.5rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid #d7d0c4;
+  border-radius: 4px;
+}
+
+.last-post {
+  max-width: 48rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
