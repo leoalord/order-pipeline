@@ -174,7 +174,7 @@ Compose publishes Postgres on `127.0.0.1:55432` — loopback only, and off the d
 
 Loadgen is the same Python image, `command: ["loadgen"]`, host **8090**. Open-loop: it keeps the offered rate even when the API returns 429 (counted rejects, never a silent drop, never a generator slowdown). Cart mix is mostly 1-item plus some 2–3. Every `POST /orders` sends the current `cohort_id`.
 
-H is this machine's sustainable rate (highest stepped rate whose snapshot backlog stays flat), measured **once** at full topology (two workers, rail, door). Mix stays **on** during calibrate.
+H is this machine's sustainable rate (highest stepped rate whose snapshot backlog stays flat), measured **once** at full topology (two workers, rail, door). Mix stays **on** during calibrate. A small absolute fill-in allowance applies only while WIP is at most four; a populated pipeline must show zero backlog growth. After finding the first overloaded step, calibrate keeps probing up to its cap until a kitchen/courier 429 proves the 3× brake (or a door 429 identifies the wrong first brake). If no positive H is found, steady and rush return 409 instead of starting a zero-rate scenario.
 
 ```bash
 # Flakiness on (compose default) before calibrate:
@@ -182,7 +182,7 @@ curl -sS http://localhost:8081/admin/faults
 curl -sS http://localhost:8082/admin/faults
 
 curl -sS -X POST http://localhost:8090/calibrate
-# → {"h": …, "http_429s": {"door": …, "kitchen": …, "courier": …}, …}
+# → {"h": …, "downstream_429_observed": true, "http_429s": {…}, …}
 
 curl -sS -X POST http://localhost:8090/scenario/steady     # 0.4×H
 curl -sS -X POST http://localhost:8090/scenario/rush       # 60s @1.5×H, then drain to 0.4×H

@@ -123,19 +123,21 @@ def test_calibrate_reports_h_and_429_mix() -> None:
     calibrated = _http(
         "POST",
         f"{LOADGEN_URL}/calibrate",
-        json={"step_s": 8, "start_rps": 0.4, "factor": 1.5, "max_rps": 0.6},
+        json={"step_s": 6, "start_rps": 0.5, "factor": 2.0, "max_rps": 8.0},
         timeout=60.0,
     )
     assert calibrated.status_code == 200, calibrated.text
     body = calibrated.json()
     assert "h" in body
     assert isinstance(body["h"], (int, float))
-    assert body["h"] >= 0
+    assert body["h"] > 0
+    assert body["downstream_429_observed"] is True
     mix = body["http_429s"]
     assert set(mix) == {"door", "kitchen", "courier"}
     for key in ("door", "kitchen", "courier"):
         assert isinstance(mix[key], int)
         assert mix[key] >= 0
+    assert mix["kitchen"] + mix["courier"] > 0
     _http("POST", f"{LOADGEN_URL}/stop")
     elapsed = time.monotonic() - started
     assert elapsed < 55, f"calibrate took {elapsed:.1f}s"

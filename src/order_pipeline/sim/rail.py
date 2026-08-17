@@ -26,10 +26,15 @@ def rail_wait_s(
     slots: list[datetime] = [now] * parallelism
     heapq.heapify(slots)
     for started_at, ready_at in sorted(occupancy, key=lambda window: window[0]):
+        # A live ticket has already consumed the interval before ``now``. Clamp
+        # its start so only the remaining pan/bike time is placed on the heap.
+        effective_start = started_at if started_at > now else now
+        remaining = ready_at - effective_start
+        if remaining.total_seconds() <= 0:
+            continue
         free_at = heapq.heappop(slots)
-        duration = ready_at - started_at
-        actual_start = free_at if free_at > started_at else started_at
-        heapq.heappush(slots, actual_start + duration)
+        actual_start = free_at if free_at > effective_start else effective_start
+        heapq.heappush(slots, actual_start + remaining)
     wait = (slots[0] - now).total_seconds()
     return max(0.0, wait)
 

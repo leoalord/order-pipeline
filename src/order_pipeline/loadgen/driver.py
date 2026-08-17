@@ -69,10 +69,11 @@ def no_progress_count(snapshot: dict[str, Any]) -> int:
 def step_is_flat(*, start_backlog: int, end_backlog: int) -> bool:
     """H is the highest rate whose backlog does not climb during the step.
 
-    A short step starting from empty always adds in-flight inventory (arrival ×
-    dwell). Slack covers that fill-in so H is not zero at a healthy 0.4/s.
+    A short step starting near empty adds normal in-flight inventory (arrival ×
+    dwell), so a small absolute fill-in is allowed only at low WIP. Once the
+    pipeline is populated, flat means no backlog growth.
     """
-    slack = max(4, int(0.35 * max(start_backlog, 1)))
+    slack = 4 if start_backlog <= 4 else 0
     return end_backlog <= start_backlog + slack
 
 
@@ -168,13 +169,13 @@ class OpenLoopDriver:
             await asyncio.gather(*pending, return_exceptions=True)
 
     def steady_rps(self) -> float:
-        if self.h is None:
-            raise RuntimeError("calibrate first")
+        if self.h is None or self.h <= 0:
+            raise RuntimeError("calibrate did not find a sustainable H")
         return self.settings.steady_fraction * self.h
 
     def rush_rps(self, mult: float = 1.0) -> float:
-        if self.h is None:
-            raise RuntimeError("calibrate first")
+        if self.h is None or self.h <= 0:
+            raise RuntimeError("calibrate did not find a sustainable H")
         return self.settings.rush_multiplier * self.h * mult
 
     async def _run_loop(self) -> None:
@@ -254,6 +255,8 @@ class OpenLoopDriver:
         await self.stop_and_drain()
         steps: list[dict[str, Any]] = []
         h = 0.0
+        overload_seen = False
+        downstream_429_observed = False
         last_mix = {"door": 0, "kitchen": 0, "courier": 0}
         last_oldest: float | None = None
         while rps <= cap + 1e-9:
@@ -265,7 +268,9 @@ class OpenLoopDriver:
             last = await self.client.snapshot(self.cohort_id)
             start_backlog = backlog_total(first)
             end_backlog = backlog_total(last)
+            first_mix = http_429s_from_snapshot(first)
             mix = http_429s_from_snapshot(last)
+            mix_delta = {name: max(0, mix[name] - first_mix[name]) for name in mix}
             start_age = oldest_age_s(first)
             age = oldest_age_s(last)
             backlog_flat = step_is_flat(
@@ -291,6 +296,7 @@ class OpenLoopDriver:
                     "oldest_age_start_s": start_age,
                     "oldest_age_s": age,
                     "http_429s": mix,
+                    "http_429s_delta": mix_delta,
                     "backlog_flat": backlog_flat,
                     "oldest_within_bound": oldest_within_bound,
                     "no_new_parks": no_new_parks,
@@ -301,9 +307,15 @@ class OpenLoopDriver:
             )
             last_mix = mix
             last_oldest = age
-            if not flat:
+            downstream_429_this_step = mix_delta["kitchen"] + mix_delta["courier"] > 0
+            door_observed = mix_delta["door"] > 0
+            if flat and not overload_seen and not downstream_429_this_step and not door_observed:
+                h = rps
+            else:
+                overload_seen = True
+            downstream_429_observed = downstream_429_observed or (downstream_429_this_step)
+            if overload_seen and (downstream_429_observed or door_observed):
                 break
-            h = rps
             rps = round(rps * grow, 4)
         await self.stop_and_drain()
         self.h = h
@@ -314,6 +326,7 @@ class OpenLoopDriver:
             "h": h,
             "http_429s": last_mix,
             "door_first": door_first,
+            "downstream_429_observed": downstream_429_observed,
             "oldest_age_s": last_oldest,
             "steps": steps,
             "hint": ("raise API_ACCEPT_CONCURRENCY and recalibrate" if door_first else None),

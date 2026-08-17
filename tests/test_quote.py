@@ -50,6 +50,37 @@ def test_rail_extends_quiet_cook_never_replaces_it() -> None:
     assert quoted.payload["quiet_cook_s"] == 25.0
 
 
+def test_in_progress_pan_uses_only_remaining_time() -> None:
+    occupancy = [(NOW - timedelta(seconds=10), NOW + timedelta(seconds=15))]
+    quoted = quote_accept(
+        {"items": ["burrito"]},
+        NOW,
+        cook_s=COOK,
+        extra_item_s=EXTRA,
+        pans=1,
+        occupancy=occupancy,
+    )
+    assert quoted.reject_status is None
+    assert quoted.estimated_ready_at == NOW + timedelta(seconds=15 + 25)
+
+
+def test_elapsed_service_does_not_create_a_false_busy_429() -> None:
+    # The occupant started 20s ago and has 40s left. Reapplying its full 60s
+    # duration would quote 85s and reject; the real 40s wait + 25s cook accepts.
+    occupancy = [(NOW - timedelta(seconds=20), NOW + timedelta(seconds=40))]
+    quoted = quote_accept(
+        {"items": ["burrito"]},
+        NOW,
+        cook_s=COOK,
+        extra_item_s=EXTRA,
+        pans=1,
+        busy_multiple=3,
+        occupancy=occupancy,
+    )
+    assert quoted.reject_status is None
+    assert quoted.estimated_ready_at == NOW + timedelta(seconds=40 + 25)
+
+
 def test_ticket_21_is_accepted_not_a_429() -> None:
     occupancy = [(NOW, NOW + timedelta(seconds=25))] * 20
     quoted = quote_accept(

@@ -53,6 +53,19 @@ def test_fleet_wait_extends_trip_bike_9_is_not_a_429() -> None:
     assert quoted.estimated_ready_at == NOW + timedelta(seconds=12 + 12)
 
 
+def test_in_progress_bike_uses_only_remaining_trip_time() -> None:
+    occupancy = [(NOW - timedelta(seconds=7), NOW + timedelta(seconds=5))]
+    quoted = quote_dispatch(
+        {"band": "near"},
+        NOW,
+        trip_s=TRIP,
+        fleet_size=1,
+        occupancy=occupancy,
+    )
+    assert quoted.reject_status is None
+    assert quoted.estimated_ready_at == NOW + timedelta(seconds=5 + 12)
+
+
 def test_courier_429_when_quoted_trip_exceeds_3x_that_band() -> None:
     occupancy = [(NOW, NOW + timedelta(seconds=30))]
     quoted = quote_dispatch(

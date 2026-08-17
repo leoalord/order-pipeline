@@ -73,6 +73,8 @@ def test_cart_mix_is_one_to_three_menu_items() -> None:
 def test_step_flatness_and_snapshot_helpers() -> None:
     assert step_is_flat(start_backlog=4, end_backlog=5)
     assert step_is_flat(start_backlog=0, end_backlog=3)
+    assert not step_is_flat(start_backlog=5, end_backlog=6)
+    assert not step_is_flat(start_backlog=40, end_backlog=54)
     assert not step_is_flat(start_backlog=4, end_backlog=20)
     snap = {
         "backlog": {"confirm": 2, "poll_cook": 3, "dispatch": 1, "poll_ride": 0},
@@ -172,6 +174,27 @@ def test_calibrate_h_is_last_flat_step_when_backlog_climbs() -> None:
     assert body["steps"][0]["flat"] is False
 
 
+def test_zero_h_refuses_steady_and_rush() -> None:
+    fake = FakePipeline()
+    fake.backlog_end = 40
+    app = create_app(LoadgenSettings(calibrate_step_s=0.05), client=fake)
+
+    with TestClient(app) as client:
+        calibrated = client.post(
+            "/calibrate",
+            json={"step_s": 0.05, "start_rps": 1.0, "factor": 2.0, "max_rps": 1.0},
+        )
+        assert calibrated.status_code == 200
+        assert calibrated.json()["h"] == 0.0
+        steady = client.post("/scenario/steady")
+        rush = client.post("/scenario/rush")
+
+    assert steady.status_code == 409
+    assert rush.status_code == 409
+    assert "did not find a sustainable H" in steady.json()["detail"]
+    assert "did not find a sustainable H" in rush.json()["detail"]
+
+
 def test_calibrate_rejects_flat_backlog_with_over_age_or_new_park() -> None:
     class UnsafePipeline(FakePipeline):
         async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
@@ -200,6 +223,53 @@ def test_calibrate_rejects_flat_backlog_with_over_age_or_new_park() -> None:
     assert body["steps"][0]["oldest_within_bound"] is False
     assert body["steps"][0]["no_new_parks"] is False
     assert body["steps"][0]["flat"] is False
+
+
+def test_calibrate_keeps_probing_after_backlog_growth_until_downstream_429() -> None:
+    class OverloadProbePipeline(FakePipeline):
+        async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
+            del cohort_id
+            self.snapshots += 1
+            samples = (
+                (0, 0),
+                (3, 0),  # 0.5 rps: low-WIP fill-in is sustainable.
+                (3, 0),
+                (10, 0),  # 1.0 rps: backlog grows, but 3x has not fired yet.
+                (10, 0),
+                (10, 1),  # 2.0 rps: continue probing until kitchen busy is seen.
+            )
+            backlog, kitchen_429s = samples[min(self.snapshots - 1, len(samples) - 1)]
+            return {
+                "backlog": {
+                    "confirm": backlog,
+                    "poll_cook": 0,
+                    "dispatch": 0,
+                    "poll_ride": 0,
+                },
+                "oldest_open": {"age_s": 10.0, "stage": "confirmed"},
+                "http_429s": {"door": 0, "kitchen": kitchen_429s, "courier": 0},
+            }
+
+    fake = OverloadProbePipeline()
+    driver = OpenLoopDriver(LoadgenSettings(), fake)
+
+    async def run() -> dict[str, Any]:
+        await driver.start()
+        result = await driver.calibrate(
+            step_s=0.05,
+            start_rps=0.5,
+            factor=2.0,
+            max_rps=2.0,
+        )
+        await driver.aclose()
+        return result
+
+    body = asyncio.run(run())
+    assert body["h"] == 0.5
+    assert len(body["steps"]) == 3
+    assert body["steps"][1]["flat"] is False
+    assert body["steps"][2]["http_429s_delta"]["kitchen"] == 1
+    assert body["downstream_429_observed"] is True
 
 
 def test_loadgen_http_health_cohort_steady_rush_stop() -> None:
