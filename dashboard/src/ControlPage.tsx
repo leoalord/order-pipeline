@@ -6,16 +6,16 @@ type LastPost = {
   body: string;
 };
 
-async function postLoadgen(
+async function post(
   path: string,
-  body?: Record<string, number>,
+  body?: Record<string, string | number>,
 ): Promise<LastPost> {
   const init: RequestInit = { method: "POST" };
   if (body !== undefined) {
     init.headers = { "Content-Type": "application/json" };
     init.body = JSON.stringify(body);
   }
-  const response = await fetch(`/loadgen${path}`, init);
+  const response = await fetch(path, init);
   const text = await response.text();
   return { path, status: response.status, body: text };
 }
@@ -26,11 +26,11 @@ export function ControlPage() {
   const [last, setLast] = useState<LastPost | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const run = async (path: string, body?: Record<string, number>) => {
+  const run = async (path: string, body?: Record<string, string | number>) => {
     setBusy(path);
     setError(null);
     try {
-      const result = await postLoadgen(path, body);
+      const result = await post(path, body);
       setLast(result);
     } catch (err) {
       setError(err instanceof Error ? err.message : "loadgen POST failed");
@@ -42,7 +42,7 @@ export function ControlPage() {
   const rush = () => {
     const trimmed = mult.trim();
     if (trimmed === "") {
-      void run("/scenario/rush");
+      void run("/loadgen/scenario/rush");
       return;
     }
     const value = Number(trimmed);
@@ -50,7 +50,7 @@ export function ControlPage() {
       setError("mult must be a number > 0");
       return;
     }
-    void run("/scenario/rush", { mult: value });
+    void run("/loadgen/scenario/rush", { mult: value });
   };
 
   return (
@@ -73,14 +73,14 @@ export function ControlPage() {
           <button
             type="button"
             disabled={busy !== null}
-            onClick={() => void run("/calibrate")}
+            onClick={() => void run("/loadgen/calibrate")}
           >
             Calibrate
           </button>
           <button
             type="button"
             disabled={busy !== null}
-            onClick={() => void run("/cohort/new")}
+            onClick={() => void run("/loadgen/cohort/new")}
           >
             New cohort
           </button>
@@ -97,7 +97,7 @@ export function ControlPage() {
           <button
             type="button"
             disabled={busy !== null}
-            onClick={() => void run("/scenario/steady")}
+            onClick={() => void run("/loadgen/scenario/steady")}
           >
             Steady
           </button>
@@ -119,9 +119,43 @@ export function ControlPage() {
           <button
             type="button"
             disabled={busy !== null}
-            onClick={() => void run("/stop")}
+            onClick={() => void run("/loadgen/stop")}
           >
             Stop
+          </button>
+        </div>
+      </section>
+
+      <section className="pane">
+        <h2>Outage</h2>
+        <p className="pane-intro">
+          Doom-confirm tags three confirms until their individual 120s clocks.
+          Restaurant blackout is the separate 60s recovery beat; arrivals stay
+          at 0.4×H. Clear removes both restaurant fault sets.
+        </p>
+        <div className="control-row">
+          <button
+            type="button"
+            disabled={busy !== null}
+            onClick={() => void run("/loadgen/beat/doom-confirm")}
+          >
+            Doom-confirm
+          </button>
+          <button
+            type="button"
+            disabled={busy !== null}
+            onClick={() =>
+              void run("/rsim/admin/faults", { mode: "blackout", seconds: 60 })
+            }
+          >
+            Restaurant blackout (60s)
+          </button>
+          <button
+            type="button"
+            disabled={busy !== null}
+            onClick={() => void run("/rsim/admin/faults", { mode: "clear" })}
+          >
+            Clear restaurant
           </button>
         </div>
       </section>

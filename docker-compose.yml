@@ -130,8 +130,11 @@ services:
     environment:
       SKIP_MIGRATIONS: "1"
       LOADGEN_API_BASE_URL: http://api:8000
+      LOADGEN_RESTAURANT_ADMIN_URL: http://restaurant:8081
     depends_on:
       api:
+        condition: service_healthy
+      restaurant:
         condition: service_healthy
     healthcheck:
       test:

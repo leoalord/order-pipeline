@@ -65,6 +65,10 @@ def test_dashboard_source_has_assignment_stage_cards_and_lite_fields() -> None:
     assert "http_429s" in home
     assert "stretching_etas" in home
     assert "sim_http" in home
+    assert "outbound_slots" in home
+    assert "http_5xx" in home
+    assert "http_429" in home
+    assert "timeout" in home
     assert "parked_list" in home
     assert "no_progress_beyond_threshold" in home
     assert "fetchLoadgenStatus" in home
@@ -75,9 +79,8 @@ def test_dashboard_source_has_assignment_stage_cards_and_lite_fields() -> None:
     assert "oldest open" in home
     assert "<button" not in home.lower()
     assert "redrive" not in home.lower()
-    assert "utilization" not in home.lower()
-    assert "slot-use" not in home.lower()
-    assert "slot use vs cap" not in home.lower()
+    assert "outbound slots" in home.lower()
+    assert "16 / 16 / 48" in home
     assert "paste-an-ID" in home
     assert "in each stage now" in home
     assert "last 60 seconds" in home
@@ -90,8 +93,14 @@ def test_control_load_group_posts_to_loadgen_proxy() -> None:
     control = (DASHBOARD / "src" / "ControlPage.tsx").read_text()
     shell = (DASHBOARD / "src" / "Shell.tsx").read_text()
     assert "<h1>Control</h1>" in control
-    assert "fetch(`/loadgen${path}`" in control
-    for path in ("/calibrate", "/cohort/new", "/scenario/steady", "/scenario/rush", "/stop"):
+    assert "fetch(path, init)" in control
+    for path in (
+        "/loadgen/calibrate",
+        "/loadgen/cohort/new",
+        "/loadgen/scenario/steady",
+        "/loadgen/scenario/rush",
+        "/loadgen/stop",
+    ):
         assert path in control, path
     assert "Calibrate" in control
     assert "New cohort" in control
@@ -99,9 +108,12 @@ def test_control_load_group_posts_to_loadgen_proxy() -> None:
     assert "Rush" in control
     assert "Stop" in control
     assert "mult" in control
-    assert "blackout" not in control.lower()
+    assert "Outage" in control
+    assert "/loadgen/beat/doom-confirm" in control
+    assert 'run("/rsim/admin/faults", { mode: "blackout", seconds: 60 })' in control
+    assert 'run("/rsim/admin/faults", { mode: "clear" })' in control
+    assert "Restaurant blackout (60s)" in control
     assert "redrive" not in control.lower()
-    assert "doom" not in control.lower()
     assert "fail_void" not in control.lower()
     assert "stock" not in control.lower()
     assert "kill" not in control.lower()

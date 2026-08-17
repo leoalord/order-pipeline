@@ -88,6 +88,8 @@ def test_dashboard_serves_spa_and_control_load_group() -> None:
     assert "waiting for" in home_src.text
     assert "accept_reject" in home_src.text
     assert "http_429s" in home_src.text
+    assert "outbound_slots" in home_src.text
+    assert "http_5xx" in home_src.text
     assert "parked_list" in home_src.text
     assert "oldest_open" in home_src.text
     snap_src = _http("GET", f"{DASHBOARD_URL}/src/snapshot.ts")
@@ -101,7 +103,12 @@ def test_dashboard_serves_spa_and_control_load_group() -> None:
     assert "/calibrate" in control_src.text
     assert "/scenario/steady" in control_src.text
     assert "/scenario/rush" in control_src.text
-    assert "blackout" not in control_src.text.lower()
+    assert "/loadgen/beat/doom-confirm" in control_src.text
+    assert "/rsim/admin/faults" in control_src.text
+    assert "blackout" in control_src.text.lower()
+    assert "seconds: 60" in control_src.text
+    assert "kill" not in control_src.text.lower()
+    assert "redrive" not in control_src.text.lower()
 
 
 def test_dashboard_proxy_snapshot_and_reserved_sim_paths() -> None:
@@ -122,6 +129,28 @@ def test_dashboard_proxy_snapshot_and_reserved_sim_paths() -> None:
     loadgen = _http("GET", f"{DASHBOARD_URL}/loadgen/health")
     assert loadgen.status_code == 200, loadgen.text
     assert loadgen.json() == {"status": "ok"}
+
+
+def test_dashboard_outage_proxy_arms_exact_60s_and_clears_restaurant() -> None:
+    """The `/control` write paths are executable through the same-origin proxies."""
+    armed = _http(
+        "POST",
+        f"{DASHBOARD_URL}/rsim/admin/faults",
+        json={"mode": "blackout", "seconds": 60},
+    )
+    assert armed.status_code == 200, armed.text
+    body = armed.json()
+    assert body["mode"] == "blackout"
+    assert 55 <= body["blackout_remaining_s"] <= 60
+
+    cleared = _http(
+        "POST",
+        f"{DASHBOARD_URL}/rsim/admin/faults",
+        json={"mode": "clear"},
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["mode"] == "off"
+    assert cleared.json()["blackout_remaining_s"] == 0
 
 
 def test_one_order_walks_every_stage_on_slash_cards() -> None:

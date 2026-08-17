@@ -143,6 +143,13 @@ def test_snapshot_fields_cohort_filter_and_trace_null_attempts(
     assert snap.parked_list == []
     assert snap.retry_rate >= 0
     assert snap.sim_http.restaurant.requests_per_min >= 0
+    assert snap.sim_http.restaurant.timeout == 0
+    assert snap.sim_http.restaurant.http_5xx == 0
+    assert snap.sim_http.restaurant.http_429 == 0
+    assert snap.outbound_slots.worker_replicas == 2
+    assert snap.outbound_slots.restaurant.cap == 16
+    assert snap.outbound_slots.courier.cap == 16
+    assert snap.outbound_slots.task.cap == 48
     assert snap.no_progress_beyond_threshold.count >= 0
     assert snap.trace is not None
     assert snap.trace.order_id == order_id
@@ -159,6 +166,96 @@ def test_snapshot_fields_cohort_filter_and_trace_null_attempts(
     assert all(row.started_at is not None for row in snap.trace.attempts)
     assert snap.trace.attempts[0].ended_at is None
     assert snap.trace.attempts[1].ended_at is not None
+
+
+def test_snapshot_splits_sim_errors_and_reports_honest_fleet_slot_totals(
+    session_factory: sessionmaker[Session],
+) -> None:
+    cohort = uuid.uuid4()
+    now = datetime.now(UTC)
+    with session_factory() as session:
+        session.begin()
+        try:
+            kitchen_order = _place(session, cohort_id=cohort)
+            courier_order = _place(session, cohort_id=cohort)
+            session.flush()
+
+            kitchen = session.scalars(
+                select(WorkItem).where(WorkItem.order_id == kitchen_order.id)
+            ).one()
+            kitchen.status = "leased"
+            kitchen.lease_owner = "worker-a"
+            kitchen.lease_until = now + timedelta(seconds=10)
+
+            courier_confirm = session.scalars(
+                select(WorkItem).where(WorkItem.order_id == courier_order.id)
+            ).one()
+            courier_confirm.status = "completed"
+            courier_confirm.next_attempt_at = None
+            courier_order.state = "ready"
+            courier = WorkItem(
+                order_id=courier_order.id,
+                work_type="dispatch",
+                status="leased",
+                idempotency_key=f"slot-dispatch-{courier_order.id}",
+                attempt_count=1,
+                next_attempt_at=now,
+                lease_owner="worker-b",
+                lease_until=now + timedelta(seconds=10),
+            )
+            session.add(courier)
+            session.flush()
+
+            for index, outcome in enumerate(
+                ("timeout", "dropped", "unknown", "http_5xx", "http_429")
+            ):
+                session.add(
+                    Attempt(
+                        work_item_id=kitchen.id,
+                        started_at=now - timedelta(seconds=index + 1),
+                        ended_at=now,
+                        lease_owner="worker-a",
+                        outcome=outcome,
+                    )
+                )
+            for index, outcome in enumerate(("http_5xx", "http_429")):
+                session.add(
+                    Attempt(
+                        work_item_id=courier.id,
+                        started_at=now - timedelta(seconds=index + 1),
+                        ended_at=now,
+                        lease_owner="worker-b",
+                        outcome=outcome,
+                    )
+                )
+            session.flush()
+
+            snap = build_snapshot(session, cohort_id=cohort, now=now, ledger_counts=())
+        finally:
+            session.rollback()
+
+    assert snap.sim_http.restaurant.timeout == 3
+    assert snap.sim_http.restaurant.http_5xx == 1
+    assert snap.sim_http.restaurant.http_429 == 1
+    assert snap.sim_http.courier.timeout == 0
+    assert snap.sim_http.courier.http_5xx == 1
+    assert snap.sim_http.courier.http_429 == 1
+    assert snap.outbound_slots.worker_replicas == 2
+    assert snap.outbound_slots.restaurant.model_dump() == {
+        "used": 1,
+        "cap": 16,
+        "per_worker_cap": 8,
+    }
+    assert snap.outbound_slots.courier.model_dump() == {
+        "used": 1,
+        "cap": 16,
+        "per_worker_cap": 8,
+    }
+    assert snap.outbound_slots.task.model_dump() == {
+        "used": 2,
+        "cap": 48,
+        "per_worker_cap": 24,
+    }
 
 
 def test_snapshot_stages_split_queued_confirmed_from_cooking_being_prepared(

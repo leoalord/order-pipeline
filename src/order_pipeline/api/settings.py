@@ -3,6 +3,12 @@ from typing import Self
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from order_pipeline.worker.settings import (
+    DEFAULT_DEP_CAP_CSIM,
+    DEFAULT_DEP_CAP_RSIM,
+    DEFAULT_TASK_CAPACITY,
+)
+
 
 class APISettings(BaseSettings):
     """Order API knobs. Compose supplies wiring (DSN); defaults live here."""
@@ -15,6 +21,12 @@ class APISettings(BaseSettings):
     # Compose wiring so GET /snapshot can read sim GET /admin/ledger (not Postgres).
     restaurant_admin_url: str = "http://restaurant:8081"
     courier_admin_url: str = "http://courier:8082"
+    # GET /snapshot reports fleet totals. These mirror the worker defaults and
+    # remain independently overrideable when a deployment changes topology.
+    worker_replicas: int = 2
+    worker_dep_cap_rsim: int = DEFAULT_DEP_CAP_RSIM
+    worker_dep_cap_csim: int = DEFAULT_DEP_CAP_CSIM
+    worker_task_capacity: int = DEFAULT_TASK_CAPACITY
 
     @model_validator(mode="after")
     def enforce_design_constraints(self) -> Self:
@@ -22,4 +34,10 @@ class APISettings(BaseSettings):
             "place_key_ttl_h must be >= 24 so a retry cannot mint a second order mid-demo"
         )
         assert self.accept_concurrency >= 1, "accept_concurrency must be >= 1"
+        assert self.worker_replicas >= 1, "worker_replicas must be >= 1"
+        assert self.worker_dep_cap_rsim >= 1, "worker_dep_cap_rsim must be >= 1"
+        assert self.worker_dep_cap_csim >= 1, "worker_dep_cap_csim must be >= 1"
+        assert self.worker_task_capacity > (self.worker_dep_cap_rsim + self.worker_dep_cap_csim), (
+            "one slow sim must never occupy every worker slot"
+        )
         return self

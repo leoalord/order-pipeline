@@ -1,4 +1,4 @@
-"""Loadgen admin HTTP: calibrate, steady, rush, stop, cohort/new."""
+"""Loadgen admin HTTP: load scenarios plus deterministic outage fixtures."""
 
 from __future__ import annotations
 
@@ -9,6 +9,13 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Query, Request
 
 from order_pipeline.loadgen.client import HttpPipelineClient, PipelineClient
+from order_pipeline.loadgen.doom_confirm import (
+    DoomConfirmClient,
+    DoomConfirmError,
+    DoomConfirmFixture,
+    DoomConfirmRace,
+    HttpDoomConfirmClient,
+)
 from order_pipeline.loadgen.driver import OpenLoopDriver
 from order_pipeline.loadgen.settings import LoadgenSettings
 
@@ -28,6 +35,7 @@ def create_app(
     settings: LoadgenSettings | None = None,
     *,
     client: PipelineClient | None = None,
+    doom_client: DoomConfirmClient | None = None,
 ) -> FastAPI:
     cfg = settings or LoadgenSettings()
     pipeline = client or HttpPipelineClient(
@@ -36,12 +44,29 @@ def create_app(
         snapshot_timeout_s=cfg.snapshot_timeout_s,
     )
     driver = OpenLoopDriver(cfg, pipeline)
+    fixture_client = doom_client
+    if fixture_client is None and client is None:
+        fixture_client = HttpDoomConfirmClient(
+            cfg.api_base_url,
+            cfg.restaurant_admin_url,
+            timeout_s=max(cfg.place_timeout_s, cfg.snapshot_timeout_s),
+        )
+    doom_fixture = (
+        DoomConfirmFixture(
+            fixture_client,
+            confirm_deadline_s=cfg.confirm_deadline_s,
+        )
+        if fixture_client is not None
+        else None
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await driver.start()
         yield
         await driver.aclose()
+        if doom_fixture is not None:
+            await doom_fixture.aclose()
 
     app = FastAPI(title="Order Pipeline Loadgen", lifespan=lifespan)
     app.state.driver = driver
@@ -109,9 +134,29 @@ def create_app(
         return driver.snapshot_status()
 
     @app.post("/cohort/new")
-    def new_cohort() -> dict[str, str]:
+    async def new_cohort() -> dict[str, str]:
+        if doom_fixture is not None:
+            try:
+                await doom_fixture.clear()
+            except DoomConfirmError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
         cohort_id = driver.new_cohort()
         return {"cohort_id": str(cohort_id)}
+
+    @app.post("/beat/doom-confirm")
+    async def doom_confirm() -> dict[str, Any]:
+        if doom_fixture is None:
+            raise HTTPException(status_code=503, detail="doom-confirm fixture client unavailable")
+        try:
+            result = await doom_fixture.create(driver.cohort_id)
+        except DoomConfirmRace as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except DoomConfirmError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {
+            "order_ids": [str(order_id) for order_id in result.order_ids],
+            "cohort_id": str(result.cohort_id),
+        }
 
     return app
 

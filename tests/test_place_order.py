@@ -58,6 +58,18 @@ def _accept_counts() -> tuple[int, int]:
     return orders, keys
 
 
+def _accept_counts_for_place_key(place_key: str) -> tuple[int, int]:
+    """Count only rows attributable to one rejected/accepted request."""
+    row = _psql(
+        "SELECT "
+        "(SELECT count(*) FROM orders o JOIN intake_keys i ON i.order_id = o.id "
+        f"WHERE i.place_key = '{place_key}'), "
+        f"(SELECT count(*) FROM intake_keys WHERE place_key = '{place_key}')"
+    )
+    orders, keys = (int(part) for part in row.split("|"))
+    return orders, keys
+
+
 def _post(
     items: list[str],
     place_key: str,
@@ -151,31 +163,28 @@ def test_optional_cohort_id_is_stored() -> None:
     ],
 )
 def test_malformed_and_over_cap_carts_create_zero_rows(kwargs: dict[str, object]) -> None:
-    before = _accept_counts()
     place_key = f"test-bad-{uuid.uuid4()}"
     response = _post(kwargs["items"], place_key)  # type: ignore[arg-type]
     assert 400 <= response.status_code < 500, response.text
-    assert _accept_counts() == before
-    assert _psql(f"SELECT count(*) FROM intake_keys WHERE place_key = '{place_key}'") == "0"
+    assert _accept_counts_for_place_key(place_key) == (0, 0)
 
 
 def test_missing_place_key_creates_zero_rows() -> None:
-    before = _accept_counts()
+    cohort_id = str(uuid.uuid4())
     try:
         response = httpx.post(
             f"{API_URL}/orders",
-            json={"items": ["burrito"]},
+            json={"items": ["burrito"], "cohort_id": cohort_id},
             headers={"Content-Type": "application/json"},
             timeout=5.0,
         )
     except httpx.RequestError as exc:
         pytest.fail(f"API is down: {exc}")
     assert 400 <= response.status_code < 500, response.text
-    assert _accept_counts() == before
+    assert _psql(f"SELECT count(*) FROM orders WHERE cohort_id = '{cohort_id}'") == "0"
 
 
 def test_malformed_json_creates_zero_rows() -> None:
-    before = _accept_counts()
     place_key = f"test-malformed-{uuid.uuid4()}"
     try:
         response = httpx.post(
@@ -190,8 +199,7 @@ def test_malformed_json_creates_zero_rows() -> None:
     except httpx.RequestError as exc:
         pytest.fail(f"API is down: {exc}")
     assert 400 <= response.status_code < 500, response.text
-    assert _accept_counts() == before
-    assert _psql(f"SELECT count(*) FROM intake_keys WHERE place_key = '{place_key}'") == "0"
+    assert _accept_counts_for_place_key(place_key) == (0, 0)
 
 
 def test_timeline_b_no_order_without_confirm_work_item() -> None:

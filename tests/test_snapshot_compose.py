@@ -47,6 +47,7 @@ REQUIRED_FIELDS = (
     "stretching_etas",
     "parked_list",
     "sim_http",
+    "outbound_slots",
     "no_progress_beyond_threshold",
 )
 
@@ -143,6 +144,13 @@ def _assert_lite_fields(body: dict[str, Any]) -> None:
     assert set(rates) == {"delivered", "cancelled", "failed"}
     e2e = body["e2e_latency_s"]
     assert "p50" in e2e and "p95" in e2e
+    for lane in ("restaurant", "courier"):
+        assert {"timeout", "http_5xx", "http_429"} <= set(body["sim_http"][lane])
+    slots = body["outbound_slots"]
+    assert slots["worker_replicas"] == 2
+    assert slots["restaurant"]["cap"] == 16
+    assert slots["courier"]["cap"] == 16
+    assert slots["task"]["cap"] == 48
 
 
 def test_snapshot_walk_shows_every_named_stage(

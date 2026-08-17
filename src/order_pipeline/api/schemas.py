@@ -111,11 +111,27 @@ class SimHttpLane(BaseModel):
     requests_per_min: float
     latency_p50_s: float | None
     latency_p95_s: float | None
+    timeout: int
+    http_5xx: int
+    http_429: int
 
 
 class SimHttp(BaseModel):
     restaurant: SimHttpLane
     courier: SimHttpLane
+
+
+class SlotUse(BaseModel):
+    used: int
+    cap: int
+    per_worker_cap: int
+
+
+class OutboundSlots(BaseModel):
+    worker_replicas: int
+    restaurant: SlotUse
+    courier: SlotUse
+    task: SlotUse
 
 
 class NoProgress(BaseModel):
@@ -146,4 +162,5 @@ class SnapshotResponse(BaseModel):
     stretching_etas: StretchingEtas
     parked_list: list[ParkedRow]
     sim_http: SimHttp
+    outbound_slots: OutboundSlots
     no_progress_beyond_threshold: NoProgress

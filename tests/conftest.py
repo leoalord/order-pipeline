@@ -22,6 +22,22 @@ TEST_DATABASE_URL = os.environ.get(
     "postgresql+psycopg://postgres:postgres@127.0.0.1:55432/order_pipeline",
 )
 
+# This live-load scenario intentionally leaves accepted work draining (and may
+# leave count-bounded work parked) after arrivals stop. Run it after the
+# deterministic happy-path compose tests so shared simulator capacity cannot
+# leak into tests that require an empty kitchen/fleet.
+STATEFUL_COMPOSE_TESTS = frozenset(
+    {
+        "tests/test_dinner_rush_compose.py::test_scenario_0_steady_walk_and_scenario_1_rush",
+    }
+)
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    regular = [item for item in items if item.nodeid not in STATEFUL_COMPOSE_TESTS]
+    stateful = [item for item in items if item.nodeid in STATEFUL_COMPOSE_TESTS]
+    items[:] = [*regular, *stateful]
+
 
 @pytest.fixture(scope="session")
 def db_engine() -> Iterator[Engine]:

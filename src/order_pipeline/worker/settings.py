@@ -3,6 +3,10 @@ from typing import Self
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+DEFAULT_DEP_CAP_RSIM = 8
+DEFAULT_DEP_CAP_CSIM = 8
+DEFAULT_TASK_CAPACITY = 24
+
 
 class WorkerSettings(BaseSettings):
     """Complete at first appearance. Compose supplies wiring (DSN, sim URL); knobs live here."""
@@ -20,9 +24,9 @@ class WorkerSettings(BaseSettings):
     transient_retries: int = 5
     backoff_base_s: float = 0.5
     backoff_cap_s: float = 8.0
-    dep_cap_rsim: int = 8
-    dep_cap_csim: int = 8
-    task_capacity: int = 24
+    dep_cap_rsim: int = DEFAULT_DEP_CAP_RSIM
+    dep_cap_csim: int = DEFAULT_DEP_CAP_CSIM
+    task_capacity: int = DEFAULT_TASK_CAPACITY
     poll_interval_s: float = 3.0
     poll_budget: int = 30
     void_retries: int = 3

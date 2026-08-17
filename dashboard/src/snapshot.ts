@@ -98,11 +98,27 @@ export type SimHttpLane = {
   requests_per_min: number;
   latency_p50_s: number | null;
   latency_p95_s: number | null;
+  timeout: number;
+  http_5xx: number;
+  http_429: number;
 };
 
 export type SimHttp = {
   restaurant: SimHttpLane;
   courier: SimHttpLane;
+};
+
+export type SlotUse = {
+  used: number;
+  cap: number;
+  per_worker_cap: number;
+};
+
+export type OutboundSlots = {
+  worker_replicas: number;
+  restaurant: SlotUse;
+  courier: SlotUse;
+  task: SlotUse;
 };
 
 export type NoProgress = {
@@ -131,6 +147,7 @@ export type Snapshot = {
   stretching_etas: StretchingEtas;
   parked_list: ParkedRow[];
   sim_http: SimHttp;
+  outbound_slots: OutboundSlots;
   no_progress_beyond_threshold: NoProgress;
 };
 

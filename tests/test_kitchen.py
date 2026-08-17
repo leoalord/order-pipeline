@@ -216,6 +216,53 @@ def test_confirm_deadline_compare_fails_the_order(
         assert event.to_state == "failed"
 
 
+def test_confirm_success_returning_at_deadline_still_fails_explicitly(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A pre-deadline call cannot confirm after its individual 120s clock."""
+    now = datetime.now(UTC)
+    order_id, item_id, stored_key, claimed = _seed_and_claim(
+        session_factory,
+        now=now,
+        worker_id="kitchen-deadline-edge",
+    )
+
+    with session_factory.begin() as session:
+        finalize_claim(
+            session,
+            claimed,
+            HandlerResult(
+                outcome="ok",
+                transition=GuardedTransition(
+                    expected_state="placed",
+                    to_state="confirmed",
+                    cause="confirm",
+                ),
+            ),
+            settings=_settings(),
+            counters=WorkerCounters(),
+            now=now + timedelta(seconds=120),
+            rng=random.Random(0),
+        )
+
+    with session_factory() as session:
+        order = session.get(Order, order_id)
+        item = session.get(WorkItem, item_id)
+        assert order is not None
+        assert item is not None
+        assert order.state == "failed"
+        assert item.status == "failed"
+        assert item.idempotency_key == stored_key
+        events = list(
+            session.scalars(
+                select(OrderEvent).where(
+                    OrderEvent.order_id == order_id, OrderEvent.applied.is_(True)
+                )
+            )
+        )
+        assert [event.cause for event in events] == ["place", CAUSE_CONFIRM_DEADLINE]
+
+
 def _seed_poll_at_budget(
     session_factory: sessionmaker[Session],
     *,

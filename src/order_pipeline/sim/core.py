@@ -25,6 +25,14 @@ class QuoteError(Exception):
         self.status_code = status_code
 
 
+class ExistingEffectConflict(Exception):
+    """A target already reached the sim before its fixture rule was installed."""
+
+    def __init__(self, idempotency_keys: list[str]) -> None:
+        super().__init__("confirm effects already exist for targeted keys")
+        self.idempotency_keys = idempotency_keys
+
+
 @dataclass(frozen=True)
 class Quote:
     estimated_ready_at: datetime
@@ -113,12 +121,20 @@ class SimCore:
         now = self._now()
         mix_off = self._flaky_5xx_pct == 0 and self._flaky_drop_pct == 0
         remaining = self.faults.blackout_remaining_s(now)
+        targets = self.faults.confirm_unavailable_targets(now)
         return {
             "mode": self.faults.effective_mode(now).value,
             "mix": "off" if mix_off else "on",
             "flaky_5xx_pct": self._flaky_5xx_pct,
             "flaky_drop_pct": self._flaky_drop_pct,
             "blackout_remaining_s": remaining,
+            "confirm_unavailable": [
+                {
+                    "idempotency_key": key,
+                    "until": isoformat_z(until),
+                }
+                for key, until in sorted(targets.items())
+            ],
         }
 
     def set_fault_command(
@@ -137,6 +153,22 @@ class SimCore:
             self._flaky_drop_pct = self._boot_drop_pct
         return self.faults_view()
 
+    def replace_confirm_unavailable(
+        self,
+        targets: dict[str, datetime],
+    ) -> dict[str, Any]:
+        """Atomically replace the targeted rule before any later accept can pass.
+
+        Existing effects mean a worker beat the fixture to the restaurant. Refuse
+        the cohort instead of pretending those orders are still safely doomed.
+        """
+        with self._accept_lock:
+            existing = [key for key in targets if self.ledger.get_by_key(key) is not None]
+            if existing:
+                raise ExistingEffectConflict(existing)
+            self.faults.replace_confirm_unavailable(targets, now=self._now())
+        return self.faults_view()
+
     def ledger_counts(self) -> dict[str, int]:
         return self.ledger.counts_by_key()
 
@@ -152,6 +184,15 @@ class SimCore:
                 action="blackout",
                 status_code=0,
                 detail="injected blackout",
+            )
+
+        # This check precedes ledger replay deliberately. A response-lost effect
+        # must not let a doomed key recover before the order's confirm deadline.
+        if self.faults.confirm_unavailable(idempotency_key, now):
+            return AcceptOutcome(
+                action="five_xx",
+                status_code=503,
+                detail="targeted confirm unavailable",
             )
 
         existing = self.ledger.get_by_key(idempotency_key)
