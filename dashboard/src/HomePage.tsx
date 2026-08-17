@@ -75,6 +75,7 @@ export function HomePage() {
   const http429s = snapshot?.http_429s;
   const stretching = snapshot?.stretching_etas;
   const simHttp = snapshot?.sim_http;
+  const outboundSlots = snapshot?.outbound_slots;
   const parked = snapshot?.parked_list ?? [];
   const noProgress = snapshot?.no_progress_beyond_threshold;
 
@@ -172,7 +173,8 @@ export function HomePage() {
         <h2>Pipeline</h2>
         <p className="pane-intro">
           Intake, work-item backlog, retries, counted 429s, stretching ETAs, and
-          per-sim HTTP. Same GET /snapshot keys the walk already polls.
+          per-sim HTTP errors plus fleet-scaled outbound slot use. Same GET
+          /snapshot keys the walk already polls.
         </p>
         <div className="card-grid">
           <article className="card">
@@ -264,7 +266,10 @@ export function HomePage() {
           </article>
           <article className="card">
             <h3>restaurant HTTP</h3>
-            <p className="hint">Kitchen work: confirm and poll_cook.</p>
+            <p className="hint">
+              Kitchen work: confirm and poll_cook. Timeout includes dropped or
+              otherwise unknown responses; retry meaning is the same.
+            </p>
             <dl>
               <div>
                 <dt>req / min</dt>
@@ -277,6 +282,18 @@ export function HomePage() {
               <div>
                 <dt>p95 (s)</dt>
                 <dd>{fmt(simHttp?.restaurant.latency_p95_s)}</dd>
+              </div>
+              <div>
+                <dt>timeout</dt>
+                <dd>{fmt(simHttp?.restaurant.timeout)}</dd>
+              </div>
+              <div>
+                <dt>5xx</dt>
+                <dd>{fmt(simHttp?.restaurant.http_5xx)}</dd>
+              </div>
+              <div>
+                <dt>429</dt>
+                <dd>{fmt(simHttp?.restaurant.http_429)}</dd>
               </div>
             </dl>
           </article>
@@ -295,6 +312,46 @@ export function HomePage() {
               <div>
                 <dt>p95 (s)</dt>
                 <dd>{fmt(simHttp?.courier.latency_p95_s)}</dd>
+              </div>
+              <div>
+                <dt>timeout</dt>
+                <dd>{fmt(simHttp?.courier.timeout)}</dd>
+              </div>
+              <div>
+                <dt>5xx</dt>
+                <dd>{fmt(simHttp?.courier.http_5xx)}</dd>
+              </div>
+              <div>
+                <dt>429</dt>
+                <dd>{fmt(simHttp?.courier.http_429)}</dd>
+              </div>
+            </dl>
+          </article>
+          <article className="card">
+            <h3>outbound slots — fleet</h3>
+            <p className="hint">
+              Active leases vs cap across {fmt(outboundSlots?.worker_replicas)}
+              workers. Per-worker defaults are restaurant 8, courier 8, task
+              24; the honest demo totals are 16 / 16 / 48.
+            </p>
+            <dl>
+              <div>
+                <dt>restaurant</dt>
+                <dd>
+                  {fmt(outboundSlots?.restaurant.used)} / {fmt(outboundSlots?.restaurant.cap)}
+                </dd>
+              </div>
+              <div>
+                <dt>courier</dt>
+                <dd>
+                  {fmt(outboundSlots?.courier.used)} / {fmt(outboundSlots?.courier.cap)}
+                </dd>
+              </div>
+              <div>
+                <dt>all tasks</dt>
+                <dd>
+                  {fmt(outboundSlots?.task.used)} / {fmt(outboundSlots?.task.cap)}
+                </dd>
               </div>
             </dl>
           </article>

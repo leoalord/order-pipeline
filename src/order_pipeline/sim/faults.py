@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Literal
@@ -34,13 +34,24 @@ def _utc_now() -> datetime:
 
 
 class FaultState:
-    """Sticky admin mode. Blackout expires on read; all modes off at boot."""
+    """Sticky admin mode plus per-key confirm-unavailable rules.
+
+    The targeted rules are separate from the global mode: a 60-second blackout
+    may expire while selected confirm keys remain unavailable until their own
+    order deadlines.
+    """
 
     def __init__(self, now_fn: NowFn | None = None) -> None:
         self._lock = threading.Lock()
         self._mode = FaultMode.OFF
         self._blackout_until: datetime | None = None
+        self._confirm_unavailable_until: dict[str, datetime] = {}
         self._now = now_fn or _utc_now
+
+    def _expire_confirm_unavailable_unlocked(self, now: datetime) -> None:
+        expired = [key for key, until in self._confirm_unavailable_until.items() if now >= until]
+        for key in expired:
+            del self._confirm_unavailable_until[key]
 
     def _expire_unlocked(self, now: datetime) -> None:
         if self._mode is not FaultMode.BLACKOUT:
@@ -54,6 +65,32 @@ class FaultState:
         with self._lock:
             self._expire_unlocked(stamp)
             return self._mode
+
+    def confirm_unavailable(self, idempotency_key: str, now: datetime | None = None) -> bool:
+        stamp = now if now is not None else self._now()
+        with self._lock:
+            self._expire_confirm_unavailable_unlocked(stamp)
+            return idempotency_key in self._confirm_unavailable_until
+
+    def confirm_unavailable_targets(self, now: datetime | None = None) -> dict[str, datetime]:
+        stamp = now if now is not None else self._now()
+        with self._lock:
+            self._expire_confirm_unavailable_unlocked(stamp)
+            return dict(self._confirm_unavailable_until)
+
+    def replace_confirm_unavailable(
+        self,
+        targets: Mapping[str, datetime],
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        stamp = now if now is not None else self._now()
+        if any(until.tzinfo is None for until in targets.values()):
+            raise ValueError("confirm-unavailable deadlines must include a timezone")
+        if any(until <= stamp for until in targets.values()):
+            raise ValueError("confirm-unavailable deadlines must be in the future")
+        with self._lock:
+            self._confirm_unavailable_until = dict(targets)
 
     @property
     def mode(self) -> FaultMode:
@@ -88,4 +125,6 @@ class FaultState:
         with self._lock:
             self._mode = mode
             self._blackout_until = None
+            if command == "clear":
+                self._confirm_unavailable_until.clear()
         return mode

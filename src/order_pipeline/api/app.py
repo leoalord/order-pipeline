@@ -142,6 +142,10 @@ def get_snapshot(
             order_id=order_id,
             ledgers_ok=restaurant_ok and courier_ok,
             door_429s=door_rejects.rejected(cohort),
+            worker_replicas=settings.worker_replicas,
+            worker_dep_cap_rsim=settings.worker_dep_cap_rsim,
+            worker_dep_cap_csim=settings.worker_dep_cap_csim,
+            worker_task_capacity=settings.worker_task_capacity,
         )
 
 

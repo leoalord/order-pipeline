@@ -19,9 +19,11 @@ from order_pipeline.api.schemas import (
     NoProgress,
     OldestOpen,
     OrderTrace,
+    OutboundSlots,
     ParkedRow,
     SimHttp,
     SimHttpLane,
+    SlotUse,
     SnapshotResponse,
     StretchingEtas,
     TerminalRates,
@@ -58,6 +60,7 @@ BACKLOG_TYPES = ("confirm", "poll_cook", "dispatch", "poll_ride")
 BACKLOG_STATUSES = frozenset({"pending", "leased"})
 KITCHEN_WORK = frozenset({"confirm", "poll_cook", "submit"})
 COURIER_WORK = frozenset({"dispatch", "poll_ride"})
+UNKNOWN_TIMEOUT_OUTCOMES = frozenset({"timeout", "dropped", "unknown"})
 
 
 def order_id_from_ledger_key(key: str) -> UUID | None:
@@ -180,13 +183,13 @@ def _sim_lane(
     work_types: frozenset[str],
     window_start: datetime,
 ) -> SimHttpLane:
-    window_rows = [
+    lane_rows = [
         attempt
         for attempt in attempts
         if (item := work_by_id.get(attempt.work_item_id)) is not None
         and item.work_type in work_types
-        and _aware(attempt.started_at) >= window_start
     ]
+    window_rows = [row for row in lane_rows if _aware(row.started_at) >= window_start]
     latencies: list[float] = []
     for attempt in window_rows:
         if attempt.ended_at is None:
@@ -196,6 +199,11 @@ def _sim_lane(
         requests_per_min=float(len(window_rows)),
         latency_p50_s=percentile(latencies, 50),
         latency_p95_s=percentile(latencies, 95),
+        # Timeout, a deliberately dropped response, and an unclassified
+        # transport failure all have the same retry meaning: outcome unknown.
+        timeout=sum(1 for row in lane_rows if row.outcome in UNKNOWN_TIMEOUT_OUTCOMES),
+        http_5xx=sum(1 for row in lane_rows if row.outcome == "http_5xx"),
+        http_429=sum(1 for row in lane_rows if row.outcome == "http_429"),
     )
 
 
@@ -208,6 +216,10 @@ def build_snapshot(
     order_id: UUID | None = None,
     ledgers_ok: bool = True,
     door_429s: int = 0,
+    worker_replicas: int = 2,
+    worker_dep_cap_rsim: int = 8,
+    worker_dep_cap_csim: int = 8,
+    worker_task_capacity: int = 24,
 ) -> SnapshotResponse:
     """Assemble the snapshot from Postgres + already-fetched sim ledgers. No HTTP here."""
     orders = list(session.scalars(select(Order).where(Order.cohort_id == cohort_id)))
@@ -289,11 +301,17 @@ def build_snapshot(
 
     at = _aware(now)
     currently_leased = 0
+    restaurant_slots_used = 0
+    courier_slots_used = 0
     for item in work_items:
         if item.status != "leased" or item.lease_until is None:
             continue
         if _aware(item.lease_until) > at:
             currently_leased += 1
+            if item.work_type in KITCHEN_WORK:
+                restaurant_slots_used += 1
+            elif item.work_type in COURIER_WORK:
+                courier_slots_used += 1
 
     latencies: list[float] = []
     for order in orders:
@@ -443,6 +461,24 @@ def build_snapshot(
         sim_http=SimHttp(
             restaurant=_sim_lane(attempts, work_by_id, KITCHEN_WORK, window_start),
             courier=_sim_lane(attempts, work_by_id, COURIER_WORK, window_start),
+        ),
+        outbound_slots=OutboundSlots(
+            worker_replicas=worker_replicas,
+            restaurant=SlotUse(
+                used=restaurant_slots_used,
+                cap=worker_dep_cap_rsim * worker_replicas,
+                per_worker_cap=worker_dep_cap_rsim,
+            ),
+            courier=SlotUse(
+                used=courier_slots_used,
+                cap=worker_dep_cap_csim * worker_replicas,
+                per_worker_cap=worker_dep_cap_csim,
+            ),
+            task=SlotUse(
+                used=currently_leased,
+                cap=worker_task_capacity * worker_replicas,
+                per_worker_cap=worker_task_capacity,
+            ),
         ),
         no_progress_beyond_threshold=NoProgress(
             threshold_s=NO_PROGRESS_THRESHOLD_S,

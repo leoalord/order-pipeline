@@ -13,6 +13,10 @@ def _clear_api_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("API_PLACE_KEY_TTL_H", raising=False)
     monkeypatch.delenv("API_RESTAURANT_ADMIN_URL", raising=False)
     monkeypatch.delenv("API_COURIER_ADMIN_URL", raising=False)
+    monkeypatch.delenv("API_WORKER_REPLICAS", raising=False)
+    monkeypatch.delenv("API_WORKER_DEP_CAP_RSIM", raising=False)
+    monkeypatch.delenv("API_WORKER_DEP_CAP_CSIM", raising=False)
+    monkeypatch.delenv("API_WORKER_TASK_CAPACITY", raising=False)
 
 
 def test_code_defaults() -> None:
@@ -21,6 +25,10 @@ def test_code_defaults() -> None:
     assert settings.place_key_ttl_h == 48
     assert settings.restaurant_admin_url == "http://restaurant:8081"
     assert settings.courier_admin_url == "http://courier:8082"
+    assert settings.worker_replicas == 2
+    assert settings.worker_dep_cap_rsim == 8
+    assert settings.worker_dep_cap_csim == 8
+    assert settings.worker_task_capacity == 24
 
 
 def test_unprefixed_env_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -47,6 +55,18 @@ def test_accept_concurrency_below_one_fails_boot() -> None:
 def test_place_key_ttl_below_24h_fails_boot() -> None:
     with pytest.raises(ValidationError):
         APISettings(database_url=_DSN, place_key_ttl_h=23)
+
+
+def test_fleet_capacity_relationship_fails_boot() -> None:
+    with pytest.raises(ValidationError):
+        APISettings(database_url=_DSN, worker_replicas=0)
+    with pytest.raises(ValidationError):
+        APISettings(
+            database_url=_DSN,
+            worker_dep_cap_rsim=8,
+            worker_dep_cap_csim=8,
+            worker_task_capacity=16,
+        )
 
 
 def test_env_wrong_defaults_fail_boot(monkeypatch: pytest.MonkeyPatch) -> None:

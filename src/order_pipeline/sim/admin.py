@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Self
+from datetime import datetime
+from typing import Annotated, Any, Literal, Self
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from order_pipeline.sim.core import SimCore
+from order_pipeline.sim.core import ExistingEffectConflict, SimCore
 
 
 class FaultsPost(BaseModel):
@@ -22,6 +23,38 @@ class FaultsPost(BaseModel):
         if self.mode == "blackout" and (self.seconds is None or self.seconds <= 0):
             raise ValueError("blackout requires seconds > 0")
         return self
+
+
+class ConfirmUnavailableTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: Annotated[str, Field(min_length=1)]
+    until: datetime
+
+    @field_validator("until")
+    @classmethod
+    def deadline_has_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("until must include a timezone")
+        return value
+
+
+class ConfirmUnavailablePost(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Empty is the targeted-only cleanup used by POST /cohort/new. It does not
+    # mutate global blackout or the always-on random mix.
+    targets: list[ConfirmUnavailableTarget]
+
+    @field_validator("targets")
+    @classmethod
+    def keys_are_unique(
+        cls, targets: list[ConfirmUnavailableTarget]
+    ) -> list[ConfirmUnavailableTarget]:
+        keys = [target.idempotency_key for target in targets]
+        if len(keys) != len(set(keys)):
+            raise ValueError("confirm-unavailable target keys must be unique")
+        return targets
 
 
 def admin_router(core: SimCore) -> APIRouter:
@@ -39,6 +72,22 @@ def admin_router(core: SimCore) -> APIRouter:
                 seconds=body.seconds,
                 mix=body.mix,
             )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @router.post("/faults/confirm-unavailable")
+    def post_confirm_unavailable(body: ConfirmUnavailablePost) -> dict[str, Any]:
+        targets = {target.idempotency_key: target.until for target in body.targets}
+        try:
+            return core.replace_confirm_unavailable(targets)
+        except ExistingEffectConflict as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "confirm effect existed before targeted rule landed",
+                    "idempotency_keys": exc.idempotency_keys,
+                },
+            ) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 

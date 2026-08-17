@@ -65,6 +65,23 @@ def apply_policy(
     now: datetime,
 ) -> HandlerResult:
     """Chassis owns 4xx-permanent vs 429-retry. Handlers must not rebuild this branch."""
+    # A call may start just before the confirm deadline and return after it.
+    # Re-check before accepting even a successful response so time-bounded
+    # confirm work cannot cross its 120s clock through that narrow edge.
+    if claimed.work_type in CONFIRM_WORK_TYPES and confirm_deadline_exceeded(
+        claimed.accepted_at, now, settings.confirm_deadline_s
+    ):
+        return HandlerResult(
+            outcome=result.outcome,
+            disposition=WorkDisposition.FAIL_ORDER,
+            transition=GuardedTransition(
+                expected_state=claimed.order_state,
+                to_state="failed",
+                cause=CAUSE_CONFIRM_DEADLINE,
+            ),
+            result_payload=result.result_payload,
+        )
+
     if result.outcome in PERMANENT_OUTCOMES:
         return HandlerResult(
             outcome=result.outcome,
@@ -92,20 +109,6 @@ def apply_policy(
             park_reason=result.park_reason,
             park_next_action=result.park_next_action,
             next_attempt_at=result.next_attempt_at,
-        )
-
-    if claimed.work_type in CONFIRM_WORK_TYPES and confirm_deadline_exceeded(
-        claimed.accepted_at, now, settings.confirm_deadline_s
-    ):
-        return HandlerResult(
-            outcome=result.outcome,
-            disposition=WorkDisposition.FAIL_ORDER,
-            transition=GuardedTransition(
-                expected_state=claimed.order_state,
-                to_state="failed",
-                cause=CAUSE_CONFIRM_DEADLINE,
-            ),
-            result_payload=result.result_payload,
         )
 
     parked = _park_if_budget_exhausted(claimed, settings, result)

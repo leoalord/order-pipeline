@@ -12,6 +12,7 @@ class LoadgenSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="LOADGEN_")
 
     api_base_url: str = "http://127.0.0.1:8000"
+    restaurant_admin_url: str = "http://127.0.0.1:8081"
     host: str = "0.0.0.0"
     port: int = 8090
     # Mirrors WORKER_CONFIRM_DEADLINE_S via env when set.

@@ -9,6 +9,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
+import httpx
 import pytest
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
@@ -17,9 +18,15 @@ from sqlalchemy.orm import Session, sessionmaker
 from order_pipeline.cancel import CancelOutcome, cancel_order
 from order_pipeline.intake import place_order
 from order_pipeline.models import Attempt, Order, OrderEvent, WorkItem
+from order_pipeline.worker.backoff import full_jitter_delay_s
 from order_pipeline.worker.chassis import Worker
 from order_pipeline.worker.claim import claim_next
-from order_pipeline.worker.classify import PERMANENT_OUTCOMES, TRANSIENT_OUTCOMES, classify_status
+from order_pipeline.worker.classify import (
+    PERMANENT_OUTCOMES,
+    TRANSIENT_OUTCOMES,
+    classify_exception,
+    classify_status,
+)
 from order_pipeline.worker.counters import WorkerCounters
 from order_pipeline.worker.deps import DepCaps
 from order_pipeline.worker.finalize import (
@@ -71,7 +78,11 @@ def _settings(
     )
 
 
-def _seed_confirm(factory: sessionmaker[Session]) -> tuple[uuid.UUID, uuid.UUID, str]:
+def _seed_confirm(
+    factory: sessionmaker[Session],
+    *,
+    next_attempt_at: datetime | None = None,
+) -> tuple[uuid.UUID, uuid.UUID, str]:
     with factory.begin() as session:
         order = place_order(
             session,
@@ -81,6 +92,7 @@ def _seed_confirm(factory: sessionmaker[Session]) -> tuple[uuid.UUID, uuid.UUID,
             ttl_hours=TTL_HOURS,
         )
         item = session.scalars(select(WorkItem).where(WorkItem.order_id == order.id)).one()
+        item.next_attempt_at = next_attempt_at
         return order.id, item.id, item.idempotency_key
 
 
@@ -114,8 +126,11 @@ def test_classify_4xx_permanent_429_transient() -> None:
 def test_two_connection_skip_locked_no_double_claim(
     db_engine: Engine, session_factory: sessionmaker[Session]
 ) -> None:
-    _, item_id, _ = _seed_confirm(session_factory)
-    now = datetime.now(UTC)
+    # Keep the compose workers from claiming this committed fixture while the
+    # test opens its two competing connections. Both test claimers use the
+    # same future logical clock, so only they consider the item due.
+    now = datetime.now(UTC) + timedelta(days=1)
+    _, item_id, _ = _seed_confirm(session_factory, next_attempt_at=now)
 
     with db_engine.connect() as conn_a, db_engine.connect() as conn_b:
         trans_a = conn_a.begin()
@@ -457,6 +472,72 @@ def test_429_retries_same_stored_key(session_factory: sessionmaker[Session]) -> 
             for event in session.scalars(select(OrderEvent).where(OrderEvent.order_id == order_id))
         }
         assert causes == {"place"}
+
+
+def test_blackout_timeout_is_unknown_and_retries_same_stored_key_with_full_jitter(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Scenario 2 retry: unknown timeout, unleased bounded jitter, same DB key."""
+    # Keep live compose workers away from the fixture until this test's logical
+    # claimer has finished, without moving the confirm beyond its 120s clock.
+    logical_now = datetime.now(UTC) + timedelta(seconds=5)
+    order_id, item_id, stored_key = _seed_confirm(
+        session_factory,
+        next_attempt_at=logical_now,
+    )
+    settings = _settings()
+    assert classify_exception(httpx.ReadTimeout("restaurant blackout")) == "timeout"
+
+    with session_factory.begin() as session:
+        claimed = _claim(
+            session,
+            item_id,
+            now=logical_now,
+            worker_id="outage-timeout",
+        )
+        assert claimed is not None
+        assert claimed.idempotency_key == stored_key
+
+    with session_factory.begin() as session:
+        finalize_claim(
+            session,
+            claimed,
+            HandlerResult(outcome="timeout"),
+            settings=settings,
+            counters=WorkerCounters(),
+            now=logical_now,
+            rng=random.Random(7),
+        )
+
+    with session_factory() as session:
+        order = session.get(Order, order_id)
+        item = session.get(WorkItem, item_id)
+        attempt = session.get(Attempt, claimed.attempt_id)
+        assert order is not None
+        assert item is not None
+        assert attempt is not None
+        assert order.state == "placed"
+        assert item.status == "pending"
+        assert item.idempotency_key == stored_key
+        assert item.lease_owner is None
+        assert item.lease_until is None
+        assert item.next_attempt_at is not None
+        assert (
+            logical_now
+            < item.next_attempt_at
+            <= (logical_now + timedelta(seconds=settings.backoff_cap_s))
+        )
+        assert attempt.outcome == "timeout"
+
+    rng = random.Random(19)
+    samples = [full_jitter_delay_s(attempt, settings, rng) for attempt in range(1, 13)]
+    ceilings = [
+        min(settings.backoff_cap_s, settings.backoff_base_s * (2 ** (attempt - 1)))
+        for attempt in range(1, 13)
+    ]
+    assert all(0 <= delay <= ceiling for delay, ceiling in zip(samples, ceilings, strict=True))
+    assert max(samples) <= settings.backoff_cap_s
+    assert len({round(delay, 4) for delay in samples}) > 1
 
 
 def test_rsim_semaphore_respects_dep_cap() -> None:

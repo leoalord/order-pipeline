@@ -23,6 +23,7 @@ DASHBOARD_URL = "http://127.0.0.1:5173"
 LOADGEN_URL = "http://localhost:8090"
 WALK_TIMEOUT_S = 180.0
 POLL_EVERY_S = 1.0
+MIN_FALLBACK_PEAK_RPS = 3.0
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STORED_TO_ASSIGNMENT = {
     "placed": "placed",
@@ -252,8 +253,19 @@ def test_scenario_0_steady_walk_and_scenario_1_rush() -> None:
             time.sleep(POLL_EVERY_S)
 
         if not saw_rise_backlog or not saw_rise_age:
-            boosted = _http("POST", f"{LOADGEN_URL}/scenario/rush?mult=2.0")
+            # The short test calibration deliberately caps its search at 1.2
+            # rps. On faster machines that can yield a conservative H whose
+            # fixed 2x fallback still sits below the overload line. Preserve
+            # the runbook's 2x minimum while raising the offered peak enough
+            # to make this automated overload proof deterministic.
+            fallback_mult = max(2.0, MIN_FALLBACK_PEAK_RPS / (1.5 * float(h)))
+            boosted = _http(
+                "POST",
+                f"{LOADGEN_URL}/scenario/rush",
+                params={"mult": str(fallback_mult)},
+            )
             assert boosted.status_code == 200, boosted.text
+            assert boosted.json()["peak_rps"] >= MIN_FALLBACK_PEAK_RPS
             boost_deadline = time.monotonic() + 70.0
             while time.monotonic() < boost_deadline:
                 last_rush = _dashboard_snapshot(cohort_id=cohort_id)

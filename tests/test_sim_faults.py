@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from order_pipeline.sim.core import Quote, SimCore
+from order_pipeline.sim.core import ExistingEffectConflict, Quote, SimCore
 from order_pipeline.sim.faults import FaultMode, FaultState
 from order_pipeline.sim.ledger import EffectLedger
 
@@ -150,3 +150,51 @@ def test_sticky_mode_beats_mix(tmp_path: Path, clock: MutableClock) -> None:
     failed = core.accept("k-sticky", {"items": ["chips"]})
     assert failed.action == "five_xx"
     assert core.ledger.get_by_key("k-sticky") is None
+
+
+def test_targeted_confirm_unavailable_is_per_key_and_expires_at_its_deadline(
+    tmp_path: Path, clock: MutableClock
+) -> None:
+    core = _core(tmp_path, clock)
+    deadline = clock.now + timedelta(seconds=120)
+    view = core.replace_confirm_unavailable({"doomed": deadline})
+
+    assert view["mode"] == "off"
+    assert view["blackout_remaining_s"] == 0
+    assert view["confirm_unavailable"] == [
+        {
+            "idempotency_key": "doomed",
+            "until": deadline.isoformat().replace("+00:00", "Z"),
+        }
+    ]
+    first = core.accept("doomed", {"items": ["chips"]})
+    again = core.accept("doomed", {"items": ["chips"]})
+    unaffected = core.accept("ordinary", {"items": ["chips"]})
+    assert first.status_code == 503
+    assert again.status_code == 503
+    assert core.ledger.get_by_key("doomed") is None
+    assert unaffected.status_code == 200
+
+    clock.now = deadline
+    recovered = core.accept("doomed", {"items": ["chips"]})
+    assert recovered.status_code == 200
+    assert core.faults_view()["confirm_unavailable"] == []
+
+
+def test_targeted_rule_aborts_for_existing_effect_and_clear_removes_rules(
+    tmp_path: Path, clock: MutableClock
+) -> None:
+    core = _core(tmp_path, clock)
+    accepted = core.accept("already-confirmed", {"items": ["taco"]})
+    assert accepted.status_code == 200
+
+    with pytest.raises(ExistingEffectConflict) as raised:
+        core.replace_confirm_unavailable({"already-confirmed": clock.now + timedelta(seconds=120)})
+    assert raised.value.idempotency_keys == ["already-confirmed"]
+    assert core.faults_view()["confirm_unavailable"] == []
+
+    core.replace_confirm_unavailable({"doomed": clock.now + timedelta(seconds=120)})
+    cleared = core.set_fault_command("clear")
+    assert cleared["mode"] == "off"
+    assert cleared["confirm_unavailable"] == []
+    assert core.accept("doomed", {"items": ["chips"]}).status_code == 200
