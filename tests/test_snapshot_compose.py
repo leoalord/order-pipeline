@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -211,14 +211,24 @@ def test_snapshot_walk_shows_every_named_stage(
         item = session.scalars(
             select(WorkItem).where(WorkItem.order_id == order_id, WorkItem.work_type == "confirm")
         ).one()
-        session.add(
-            Attempt(
-                work_item_id=item.id,
-                started_at=datetime.now(UTC),
-                ended_at=None,
-                lease_owner="abandoned-lease",
-                outcome=None,
-            )
+        abandoned_at = datetime.now(UTC)
+        session.add_all(
+            [
+                Attempt(
+                    work_item_id=item.id,
+                    started_at=abandoned_at,
+                    ended_at=None,
+                    lease_owner="abandoned-lease",
+                    outcome=None,
+                ),
+                Attempt(
+                    work_item_id=item.id,
+                    started_at=abandoned_at + timedelta(microseconds=1),
+                    ended_at=abandoned_at + timedelta(microseconds=2),
+                    lease_owner="reclaimer",
+                    outcome="ok",
+                ),
+            ]
         )
 
     traced = _snapshot(cohort_id=cohort_id, order_id=order_id)
@@ -294,3 +304,9 @@ def test_compose_snapshot_wiring() -> None:
     compose = (REPO_ROOT / "docker-compose.yml").read_text()
     assert "API_RESTAURANT_ADMIN_URL: http://restaurant:8081" in compose
     assert "API_COURIER_ADMIN_URL: http://courier:8082" in compose
+    assert "API_WORKER_REPLICAS: ${ORDER_PIPELINE_WORKER_REPLICAS:-2}" in compose
+    assert "replicas: ${ORDER_PIPELINE_WORKER_REPLICAS:-2}" in compose
+    assert compose.count("${ORDER_PIPELINE_DEP_CAP_RSIM:-8}") == 2
+    assert compose.count("${ORDER_PIPELINE_DEP_CAP_CSIM:-8}") == 2
+    assert compose.count("${ORDER_PIPELINE_TASK_CAPACITY:-24}") == 2
+    assert compose.count("${ORDER_PIPELINE_CONFIRM_DEADLINE_S:-120}") == 2

@@ -280,6 +280,11 @@ def test_clear_shows_mix_off(client: TestClient) -> None:
 
 
 def test_blackout_post_get_then_expires(client: TestClient, clock: MutableClock) -> None:
+    existing_key = f"unit-blackout-existing-{uuid.uuid4()}"
+    existing = _accept(client, ["chips"], existing_key)
+    assert existing.status_code == 200
+    existing_ticket_id = existing.json()["ticket_id"]
+
     armed = client.post("/admin/faults", json={"mode": "blackout", "seconds": 2})
     assert armed.status_code == 200, armed.text
     body = armed.json()
@@ -297,6 +302,16 @@ def test_blackout_post_get_then_expires(client: TestClient, clock: MutableClock)
     else:
         pytest.fail(f"blackout returned a complete response: {dropped.status_code} {dropped.text}")
     assert client.get("/admin/ledger").json()["counts"].get(key) is None
+
+    for path in (f"/keys/{existing_key}", f"/tickets/{existing_ticket_id}"):
+        try:
+            response = client.get(path)
+        except (httpx.TransportError, RuntimeError, AssertionError):
+            pass
+        else:
+            pytest.fail(
+                f"blackout let dependency polling complete: {response.status_code} {response.text}"
+            )
 
     clock.now = clock.now + timedelta(seconds=2)
     expired = client.get("/admin/faults")

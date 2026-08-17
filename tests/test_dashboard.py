@@ -72,7 +72,9 @@ def test_dashboard_source_has_assignment_stage_cards_and_lite_fields() -> None:
     assert "parked_list" in home
     assert "no_progress_beyond_threshold" in home
     assert "fetchLoadgenStatus" in home
-    assert "cohortId: loadgen.cohort_id" in home
+    assert "activeCohort = loadgen.cohort_id" in home
+    assert "showing the last known cohort" in home
+    assert "setInterval" not in home
     assert 'fetch("/loadgen/status"' in snapshot
     assert "Pipeline" in home
     assert "parked list" in home
@@ -80,7 +82,8 @@ def test_dashboard_source_has_assignment_stage_cards_and_lite_fields() -> None:
     assert "<button" not in home.lower()
     assert "redrive" not in home.lower()
     assert "outbound slots" in home.lower()
-    assert "16 / 16 / 48" in home
+    assert "configured cap" in home
+    assert "not live replica discovery" in home
     assert "paste-an-ID" in home
     assert "in each stage now" in home
     assert "last 60 seconds" in home

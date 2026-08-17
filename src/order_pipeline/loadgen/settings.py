@@ -5,6 +5,8 @@ from typing import Self
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from order_pipeline.worker.settings import DEFAULT_CONFIRM_DEADLINE_S
+
 
 class LoadgenSettings(BaseSettings):
     """Scenario profiles. Mirrors the confirm deadline for the cross-service boot assertion."""
@@ -16,7 +18,7 @@ class LoadgenSettings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8090
     # Mirrors WORKER_CONFIRM_DEADLINE_S via env when set.
-    confirm_deadline_s: float = 120.0
+    confirm_deadline_s: float = DEFAULT_CONFIRM_DEADLINE_S
     blackout_s: float = 60.0
     rush_multiplier: float = 1.5
     steady_fraction: float = 0.4

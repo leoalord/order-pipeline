@@ -81,7 +81,7 @@ def _wait_cohort_backlog_clear(cohort_id: str) -> None:
 
 def test_compose_two_worker_replicas_no_host_8083() -> None:
     assert 'restart: "no"' in COMPOSE
-    assert "replicas: 2" in COMPOSE
+    assert "replicas: ${ORDER_PIPELINE_WORKER_REPLICAS:-2}" in COMPOSE
     assert 'command: ["worker"]' in COMPOSE
     assert '"8083:8083"' not in COMPOSE
     assert "8083/health" in COMPOSE

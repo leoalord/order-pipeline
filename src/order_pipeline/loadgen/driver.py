@@ -257,6 +257,7 @@ class OpenLoopDriver:
         h = 0.0
         overload_seen = False
         downstream_429_observed = False
+        first_brake: str | None = None
         last_mix = {"door": 0, "kitchen": 0, "courier": 0}
         last_oldest: float | None = None
         while rps <= cap + 1e-9:
@@ -309,6 +310,17 @@ class OpenLoopDriver:
             last_oldest = age
             downstream_429_this_step = mix_delta["kitchen"] + mix_delta["courier"] > 0
             door_observed = mix_delta["door"] > 0
+            if first_brake is None:
+                if door_observed and not downstream_429_this_step:
+                    first_brake = "door"
+                elif downstream_429_this_step and not door_observed:
+                    first_brake = "downstream"
+                elif door_observed and downstream_429_this_step:
+                    first_brake = (
+                        "door"
+                        if mix_delta["door"] > mix_delta["kitchen"] + mix_delta["courier"]
+                        else "downstream"
+                    )
             if flat and not overload_seen and not downstream_429_this_step and not door_observed:
                 h = rps
             else:
@@ -319,9 +331,10 @@ class OpenLoopDriver:
             rps = round(rps * grow, 4)
         await self.stop_and_drain()
         self.h = h
-        door_first = last_mix["door"] > 0 and last_mix["door"] > (
-            last_mix["kitchen"] + last_mix["courier"]
-        )
+        # Snapshot counters are cohort-cumulative. Restrict this decision to
+        # brake events observed during this calibration so an earlier run
+        # cannot poison the result after the operator raises the door cap.
+        door_first = first_brake == "door"
         return {
             "h": h,
             "http_429s": last_mix,

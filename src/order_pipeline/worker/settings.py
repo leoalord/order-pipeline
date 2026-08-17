@@ -6,6 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 DEFAULT_DEP_CAP_RSIM = 8
 DEFAULT_DEP_CAP_CSIM = 8
 DEFAULT_TASK_CAPACITY = 24
+DEFAULT_CONFIRM_DEADLINE_S = 120.0
 
 
 class WorkerSettings(BaseSettings):
@@ -20,7 +21,7 @@ class WorkerSettings(BaseSettings):
 
     sim_timeout_s: float = 2.0
     lease_s: float = 15.0
-    confirm_deadline_s: float = 120.0
+    confirm_deadline_s: float = DEFAULT_CONFIRM_DEADLINE_S
     transient_retries: int = 5
     backoff_base_s: float = 0.5
     backoff_cap_s: float = 8.0
@@ -36,6 +37,8 @@ class WorkerSettings(BaseSettings):
         assert self.lease_s > self.sim_timeout_s, (
             "lease must exceed sim timeout so a live call is not stolen"
         )
+        assert self.dep_cap_rsim >= 1, "dep_cap_rsim must be >= 1"
+        assert self.dep_cap_csim >= 1, "dep_cap_csim must be >= 1"
         assert self.task_capacity > self.dep_cap_rsim + self.dep_cap_csim, (
             "one slow sim must never occupy every slot"
         )

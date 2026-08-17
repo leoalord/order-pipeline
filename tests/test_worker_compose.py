@@ -60,6 +60,6 @@ def test_compose_worker_is_two_replicas_restart_no() -> None:
     assert "WORKER_DATABASE_URL" in COMPOSE
     assert "WORKER_RESTAURANT_BASE_URL: http://restaurant:8081" in COMPOSE
     assert "WORKER_COURIER_BASE_URL: http://courier:8082" in COMPOSE
-    assert "replicas: 2" in COMPOSE
+    assert "replicas: ${ORDER_PIPELINE_WORKER_REPLICAS:-2}" in COMPOSE
     assert "8083/health" in COMPOSE
     assert '"8083:8083"' not in COMPOSE

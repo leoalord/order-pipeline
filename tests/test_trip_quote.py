@@ -38,6 +38,9 @@ def test_draw_without_band_is_deterministic() -> None:
     assert first.estimated_ready_at == second.estimated_ready_at
     assert first.payload["band"] in {"near", "mid", "far"}
 
+    observed = {draw_band({"order_id": f"order-{index}"}) for index in range(30)}
+    assert observed == {"near", "mid", "far"}
+
 
 def test_fleet_wait_extends_trip_bike_9_is_not_a_429() -> None:
     occupancy = [(NOW, NOW + timedelta(seconds=12))] * 8
