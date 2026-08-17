@@ -31,6 +31,16 @@ class OrderResponse(BaseModel):
     cohort_id: UUID
 
 
+class RedriveResponse(BaseModel):
+    id: UUID
+    order_id: UUID
+    work_type: str
+    status: str
+    attempt_count: int
+    next_attempt_at: datetime | None
+    idempotency_key: str
+
+
 class TerminalRates(BaseModel):
     delivered: float
     cancelled: float
@@ -100,6 +110,7 @@ class StretchingEtas(BaseModel):
 
 
 class ParkedRow(BaseModel):
+    id: UUID
     order_id: UUID
     work_type: str
     owner: str | None

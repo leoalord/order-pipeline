@@ -446,6 +446,8 @@ def test_startup_scan_and_mismatch_and_leased_and_parked_outside(
             assert snap.state_vs_last_order_events_mismatches >= 1
             assert snap.invalid_transitions == 0
             assert len(snap.parked_list) == 1
+            assert snap.parked_list[0].id == parked.id
+            assert snap.parked_list[0].order_id == parked.order_id
             assert snap.parked_list[0].owner == "worker-1"
             assert snap.parked_list[0].reason == "retry_budget_exhausted"
             assert snap.parked_list[0].next_action == "redrive"

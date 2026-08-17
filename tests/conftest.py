@@ -29,6 +29,7 @@ TEST_DATABASE_URL = os.environ.get(
 STATEFUL_COMPOSE_TESTS = frozenset(
     {
         "tests/test_dinner_rush_compose.py::test_scenario_0_steady_walk_and_scenario_1_rush",
+        "tests/test_worker_crash_compose.py::test_scenario_3_kill_resume_then_park_clear_redrive",
     }
 )
 

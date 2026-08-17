@@ -10,7 +10,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 from order_pipeline.api.door import CohortRejects, DoorCap
-from order_pipeline.api.schemas import OrderResponse, PlaceOrderRequest, SnapshotResponse
+from order_pipeline.api.schemas import (
+    OrderResponse,
+    PlaceOrderRequest,
+    RedriveResponse,
+    SnapshotResponse,
+)
 from order_pipeline.api.settings import APISettings
 from order_pipeline.api.snapshot import build_snapshot, fetch_ledger_counts
 from order_pipeline.cancel import CancelOutcome, OrderNotFound, cancel_order
@@ -23,6 +28,7 @@ from order_pipeline.intake import (
     replay_existing,
 )
 from order_pipeline.models import Order
+from order_pipeline.redrive import WorkItemNotFound, WorkItemNotParked, redrive_work_item
 
 settings = APISettings()
 # Every request admitted through the door must be able to reach Postgres. The
@@ -179,3 +185,24 @@ def post_cancel(order_id: UUID) -> OrderResponse:
             detail="cancel is not legal after being prepared",
         )
     return _order_response(order)
+
+
+@app.post("/work-items/{work_item_id}/redrive")
+def post_redrive(work_item_id: UUID) -> RedriveResponse:
+    now = datetime.now(UTC)
+    try:
+        with SessionLocal.begin() as session:
+            item = redrive_work_item(session, work_item_id, now=now)
+            return RedriveResponse(
+                id=item.id,
+                order_id=item.order_id,
+                work_type=item.work_type,
+                status=item.status,
+                attempt_count=item.attempt_count,
+                next_attempt_at=item.next_attempt_at,
+                idempotency_key=item.idempotency_key,
+            )
+    except WorkItemNotFound as exc:
+        raise HTTPException(status_code=404, detail="work item not found") from exc
+    except WorkItemNotParked as exc:
+        raise HTTPException(status_code=409, detail="work item is not parked") from exc

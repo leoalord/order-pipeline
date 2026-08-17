@@ -416,6 +416,7 @@ def build_snapshot(
 
     parked_list = [
         ParkedRow(
+            id=item.id,
             order_id=item.order_id,
             work_type=item.work_type,
             owner=item.park_owner,

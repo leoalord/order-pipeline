@@ -4,6 +4,7 @@ import {
   fetchLoadgenStatus,
   fetchSnapshot,
   POLL_MS,
+  redriveWorkItem,
   STAGE_LABELS,
   STAGE_SEAMS,
   type Snapshot,
@@ -23,6 +24,9 @@ export function HomePage() {
   const [error, setError] = useState<string | null>(null);
   const [orderId, setOrderId] = useState("");
   const [cohortId, setCohortId] = useState<string | null>(null);
+  const [redriving, setRedriving] = useState<string | null>(null);
+  const [redriveStatus, setRedriveStatus] = useState<string | null>(null);
+  const [refreshEpoch, setRefreshEpoch] = useState(0);
   const cohortIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -82,7 +86,21 @@ export function HomePage() {
         window.clearTimeout(timer);
       }
     };
-  }, [orderId]);
+  }, [orderId, refreshEpoch]);
+
+  const redrive = async (workItemId: string) => {
+    setRedriving(workItemId);
+    setRedriveStatus(null);
+    try {
+      const result = await redriveWorkItem(workItemId);
+      setRedriveStatus(`Redrove ${result.work_type} for order ${result.order_id}.`);
+      setRefreshEpoch((value) => value + 1);
+    } catch (err) {
+      setRedriveStatus(err instanceof Error ? err.message : "Redrive failed");
+    } finally {
+      setRedriving(null);
+    }
+  };
 
   const stages = snapshot?.stages;
   const rates = snapshot?.terminal_rates_per_min;
@@ -458,9 +476,11 @@ export function HomePage() {
         <article className="card parked">
           <h3>parked list</h3>
           <p className="hint">
-            Read-only. Owner, reason, and next action. Parked work is stalled,
-            not lost, and not a lifecycle stage.
+            Owner, reason, and next action. Clear the dependency fault, then
+            Redrive the same stored job. Parked work is stalled, not lost, and
+            not a lifecycle stage.
           </p>
+          {redriveStatus ? <p className="hint">{redriveStatus}</p> : null}
           {parked.length === 0 ? (
             <p className="hint">None in this cohort.</p>
           ) : (
@@ -473,16 +493,27 @@ export function HomePage() {
                     <th>owner</th>
                     <th>reason</th>
                     <th>next action</th>
+                    <th>operator</th>
                   </tr>
                 </thead>
                 <tbody>
                   {parked.map((row) => (
-                    <tr key={`${row.order_id}-${row.work_type}`}>
+                    <tr key={row.id}>
                       <td>{row.order_id}</td>
                       <td>{row.work_type}</td>
                       <td>{row.owner ?? "—"}</td>
                       <td>{row.reason ?? "—"}</td>
                       <td>{row.next_action ?? "—"}</td>
+                      <td>
+                        <button
+                          className="redrive-button"
+                          type="button"
+                          disabled={redriving !== null}
+                          onClick={() => void redrive(row.id)}
+                        >
+                          {redriving === row.id ? "Redriving…" : "Redrive"}
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>

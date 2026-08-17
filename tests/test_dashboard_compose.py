@@ -91,6 +91,7 @@ def test_dashboard_serves_spa_and_control_load_group() -> None:
     assert "outbound_slots" in home_src.text
     assert "http_5xx" in home_src.text
     assert "parked_list" in home_src.text
+    assert "Redrive" in home_src.text
     assert "oldest_open" in home_src.text
     snap_src = _http("GET", f"{DASHBOARD_URL}/src/snapshot.ts")
     assert snap_src.status_code == 200, snap_src.text
@@ -107,6 +108,9 @@ def test_dashboard_serves_spa_and_control_load_group() -> None:
     assert "/rsim/admin/faults" in control_src.text
     assert "blackout" in control_src.text.lower()
     assert "seconds: 60" in control_src.text
+    assert "Crash assist" in control_src.text
+    assert "/csim/admin/faults" in control_src.text
+    assert "seconds: 30" in control_src.text
     assert "kill" not in control_src.text.lower()
     assert "redrive" not in control_src.text.lower()
 
@@ -117,6 +121,8 @@ def test_dashboard_proxy_snapshot_and_reserved_sim_paths() -> None:
     assert via_dash.status_code == 200, via_dash.text
     assert via_api.status_code == 200, via_api.text
     assert set(via_dash.json()["stages"]) == set(via_api.json()["stages"]) == set(STAGE_NAMES)
+    missing = _http("POST", f"{DASHBOARD_URL}/work-items/{uuid.uuid4()}/redrive")
+    assert missing.status_code == 404, missing.text
     rsim = _http("GET", f"{DASHBOARD_URL}/rsim/health")
     assert rsim.status_code == 200, rsim.text
     assert rsim.json() == {"status": "ok"}
@@ -129,6 +135,26 @@ def test_dashboard_proxy_snapshot_and_reserved_sim_paths() -> None:
     loadgen = _http("GET", f"{DASHBOARD_URL}/loadgen/health")
     assert loadgen.status_code == 200, loadgen.text
     assert loadgen.json() == {"status": "ok"}
+
+
+def test_dashboard_crash_assist_arms_exact_30s_courier_blackout() -> None:
+    armed = _http(
+        "POST",
+        f"{DASHBOARD_URL}/csim/admin/faults",
+        json={"mode": "blackout", "seconds": 30},
+    )
+    assert armed.status_code == 200, armed.text
+    body = armed.json()
+    assert body["mode"] == "blackout"
+    assert 25 <= body["blackout_remaining_s"] <= 30
+
+    cleared = _http(
+        "POST",
+        f"{DASHBOARD_URL}/csim/admin/faults",
+        json={"mode": "clear", "mix": "off"},
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["mode"] == "off"
 
 
 def test_dashboard_outage_proxy_arms_exact_60s_and_clears_restaurant() -> None:

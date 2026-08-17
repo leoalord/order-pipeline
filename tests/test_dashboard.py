@@ -79,8 +79,10 @@ def test_dashboard_source_has_assignment_stage_cards_and_lite_fields() -> None:
     assert "Pipeline" in home
     assert "parked list" in home
     assert "oldest open" in home
-    assert "<button" not in home.lower()
-    assert "redrive" not in home.lower()
+    assert "<button" in home.lower()
+    assert "redrive" in home.lower()
+    assert "redriveWorkItem(row.id)" not in home
+    assert "redrive(row.id)" in home
     assert "outbound slots" in home.lower()
     assert "configured cap" in home
     assert "not live replica discovery" in home
@@ -116,6 +118,9 @@ def test_control_load_group_posts_to_loadgen_proxy() -> None:
     assert 'run("/rsim/admin/faults", { mode: "blackout", seconds: 60 })' in control
     assert 'run("/rsim/admin/faults", { mode: "clear" })' in control
     assert "Restaurant blackout (60s)" in control
+    assert "Crash assist" in control
+    assert 'run("/csim/admin/faults", { mode: "blackout", seconds: 30 })' in control
+    assert "Courier blackout (30s)" in control
     assert "redrive" not in control.lower()
     assert "fail_void" not in control.lower()
     assert "stock" not in control.lower()
@@ -140,6 +145,7 @@ def test_vite_proxy_reserves_loadgen_rsim_csim() -> None:
     assert '"/rsim"' in config
     assert '"/csim"' in config
     assert '"/snapshot"' in config
+    assert '"/work-items"' in config
     assert "VITE_RSIM" not in config
     assert "VITE_CSIM" not in config
     assert "VITE_LOADGEN" not in config
