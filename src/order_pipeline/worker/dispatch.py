@@ -23,7 +23,6 @@ DISPATCH_WORK_TYPE = "dispatch"
 POLL_RIDE_WORK_TYPE = "poll_ride"
 CAUSE_DISPATCH = "dispatch"
 CAUSE_DELIVERED = "delivered"
-QUIET_TRIP_BAND = "near"
 
 
 class CourierSimClient(Protocol):
@@ -72,9 +71,11 @@ class CourierHandlers:
 
     async def dispatch(self, claimed: ClaimedWork) -> HandlerResult:
         # Always the stored (order_id, dispatch) key. Timeout retries must not mint a new one.
+        # Omit band so the courier deterministically draws near/mid/far from this
+        # stable request body. Replays therefore draw the same band.
         response = await self.client.accept(
             idempotency_key=claimed.idempotency_key,
-            body={"band": QUIET_TRIP_BAND, "order_id": str(claimed.order_id)},
+            body={"order_id": str(claimed.order_id)},
         )
         outcome = classify_status(response.status_code)
         if outcome != "ok":

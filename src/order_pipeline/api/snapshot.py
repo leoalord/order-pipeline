@@ -30,9 +30,8 @@ from order_pipeline.api.schemas import (
     TraceAttempt,
     TraceEvent,
 )
+from order_pipeline.lifecycle import CAUSE_INVALID
 from order_pipeline.models import Attempt, Order, OrderEvent, WorkItem
-
-CAUSE_INVALID = "invalid_transition"
 
 # Assignment names. Code stores being_prepared / out_for_delivery; JSON uses these keys.
 STAGE_NAMES = (
@@ -61,6 +60,26 @@ BACKLOG_STATUSES = frozenset({"pending", "leased"})
 KITCHEN_WORK = frozenset({"confirm", "poll_cook", "submit"})
 COURIER_WORK = frozenset({"dispatch", "poll_ride"})
 UNKNOWN_TIMEOUT_OUTCOMES = frozenset({"timeout", "dropped", "unknown"})
+
+
+def retry_attempt_ids(attempts: Sequence[Attempt]) -> set[UUID]:
+    """Return attempts that follow a failed, unknown, or abandoned call.
+
+    Successful not-ready polls schedule another observation of the dependency;
+    they are normal polling, not retries. A later attempt is retry traffic only
+    when the preceding call on that work item did not complete successfully.
+    """
+    by_work: dict[UUID, list[Attempt]] = {}
+    for attempt in attempts:
+        by_work.setdefault(attempt.work_item_id, []).append(attempt)
+
+    retry_ids: set[UUID] = set()
+    for rows in by_work.values():
+        ordered = sorted(rows, key=lambda row: (_aware(row.started_at), row.id))
+        for previous, current in zip(ordered, ordered[1:], strict=False):
+            if previous.outcome != "ok":
+                retry_ids.add(current.id)
+    return retry_ids
 
 
 def order_id_from_ledger_key(key: str) -> UUID | None:
@@ -201,9 +220,9 @@ def _sim_lane(
         latency_p95_s=percentile(latencies, 95),
         # Timeout, a deliberately dropped response, and an unclassified
         # transport failure all have the same retry meaning: outcome unknown.
-        timeout=sum(1 for row in lane_rows if row.outcome in UNKNOWN_TIMEOUT_OUTCOMES),
-        http_5xx=sum(1 for row in lane_rows if row.outcome == "http_5xx"),
-        http_429=sum(1 for row in lane_rows if row.outcome == "http_429"),
+        timeout=sum(1 for row in window_rows if row.outcome in UNKNOWN_TIMEOUT_OUTCOMES),
+        http_5xx=sum(1 for row in window_rows if row.outcome == "http_5xx"),
+        http_429=sum(1 for row in window_rows if row.outcome == "http_429"),
     )
 
 
@@ -294,10 +313,8 @@ def build_snapshot(
         if last is None or last.to_state != order.state:
             mismatches += 1
 
-    attempts_by_work: dict[UUID, int] = {}
-    for attempt in attempts:
-        attempts_by_work[attempt.work_item_id] = attempts_by_work.get(attempt.work_item_id, 0) + 1
-    duplicate_attempts = sum(max(0, count - 1) for count in attempts_by_work.values())
+    retry_ids = retry_attempt_ids(attempts)
+    duplicate_attempts = len(retry_ids)
 
     at = _aware(now)
     currently_leased = 0
@@ -340,14 +357,8 @@ def build_snapshot(
             continue
         backlog[item.work_type] += 1
 
-    first_started: dict[UUID, datetime] = {}
-    for attempt in sorted(attempts, key=lambda row: (_aware(row.started_at), row.id)):
-        if attempt.work_item_id not in first_started:
-            first_started[attempt.work_item_id] = _aware(attempt.started_at)
     window_attempts = [row for row in attempts if _aware(row.started_at) >= window_start]
-    retries = sum(
-        1 for row in window_attempts if first_started[row.work_item_id] < _aware(row.started_at)
-    )
+    retries = sum(1 for row in window_attempts if row.id in retry_ids)
     retry_rate = (retries / len(window_attempts)) if window_attempts else 0.0
 
     oldest_order: Order | None = None

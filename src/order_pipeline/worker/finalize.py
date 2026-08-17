@@ -9,6 +9,7 @@ from uuid import UUID
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
+from order_pipeline.lifecycle import CAUSE_INVALID, is_legal_transition
 from order_pipeline.models import Attempt, Order, OrderEvent, WorkItem
 from order_pipeline.worker.backoff import full_jitter_delay_s
 from order_pipeline.worker.classify import PERMANENT_OUTCOMES
@@ -28,10 +29,11 @@ from order_pipeline.worker.stop_rules import (
     count_budget_for,
 )
 
-CAUSE_INVALID = "invalid_transition"
 CAUSE_SUPERSEDED = "superseded_by_cancel"
 CAUSE_PERMANENT_4XX = "permanent_4xx"
 CAUSE_CONFIRM_DEADLINE = "confirm_deadline"
+PARK_REASON_GUARD_REJECTED = "guarded_transition_rejected"
+PARK_NEXT_ACTION_GUARD_REJECTED = "inspect_then_redrive"
 
 
 def _park_if_budget_exhausted(
@@ -157,6 +159,20 @@ def apply_guarded_transition(
     now: datetime,
 ) -> bool:
     """Conditional UPDATE. Zero rows are never applied. Cancel race is supersession, not invalid."""
+    if not is_legal_transition(transition.expected_state, transition.to_state):
+        order = session.get(Order, claimed.order_id)
+        current_state = order.state if order is not None else claimed.order_state
+        counters.invalid_transitions += 1
+        _append_evidence(
+            session,
+            order_id=claimed.order_id,
+            from_state=current_state,
+            to_state=transition.to_state,
+            cause=CAUSE_INVALID,
+            now=now,
+        )
+        return False
+
     executed = session.execute(
         update(Order)
         .where(
@@ -254,7 +270,13 @@ def finalize_claim(
     if not applied:
         _release_lease(item)
         order = session.get(Order, claimed.order_id)
-        item.status = "cancelled" if order is not None and order.state == "cancelled" else "failed"
+        if order is not None and order.state == "cancelled":
+            item.status = "cancelled"
+        else:
+            item.status = "parked"
+            item.park_owner = claimed.lease_owner
+            item.park_reason = PARK_REASON_GUARD_REJECTED
+            item.park_next_action = PARK_NEXT_ACTION_GUARD_REJECTED
         return
 
     disposition = policy.disposition or WorkDisposition.COMPLETE

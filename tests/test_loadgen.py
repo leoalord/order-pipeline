@@ -272,6 +272,43 @@ def test_calibrate_keeps_probing_after_backlog_growth_until_downstream_429() -> 
     assert body["downstream_429_observed"] is True
 
 
+def test_calibrate_door_first_ignores_earlier_cumulative_429s() -> None:
+    class PriorDoorPipeline(FakePipeline):
+        async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
+            del cohort_id
+            self.snapshots += 1
+            return {
+                "backlog": {"confirm": 0, "poll_cook": 0, "dispatch": 0, "poll_ride": 0},
+                "oldest_open": {"age_s": 1.0, "stage": "placed"},
+                # Ten door rejections predate this calibration; the kitchen
+                # rejection is the only brake that appears during this run.
+                "http_429s": {
+                    "door": 10,
+                    "kitchen": 0 if self.snapshots == 1 else 1,
+                    "courier": 0,
+                },
+            }
+
+    fake = PriorDoorPipeline()
+    driver = OpenLoopDriver(LoadgenSettings(), fake)
+
+    async def run() -> dict[str, Any]:
+        await driver.start()
+        result = await driver.calibrate(
+            step_s=0.05,
+            start_rps=1.0,
+            factor=2.0,
+            max_rps=1.0,
+        )
+        await driver.aclose()
+        return result
+
+    body = asyncio.run(run())
+    assert body["downstream_429_observed"] is True
+    assert body["door_first"] is False
+    assert body["hint"] is None
+
+
 def test_loadgen_http_health_cohort_steady_rush_stop() -> None:
     fake = FakePipeline()
     settings = LoadgenSettings(calibrate_step_s=0.05)

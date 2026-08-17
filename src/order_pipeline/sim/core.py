@@ -117,6 +117,10 @@ class SimCore:
     def ping(self) -> None:
         self.ledger.ping()
 
+    def blackout_active(self) -> bool:
+        """Whether ordinary dependency traffic is currently unavailable."""
+        return self.faults.effective_mode(self._now()) is FaultMode.BLACKOUT
+
     def faults_view(self) -> dict[str, Any]:
         now = self._now()
         mix_off = self._flaky_5xx_pct == 0 and self._flaky_drop_pct == 0

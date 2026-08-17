@@ -82,6 +82,17 @@ def test_capacity_not_exceeding_cap_sum_fails_boot() -> None:
         )
 
 
+@pytest.mark.parametrize(("dep_cap_rsim", "dep_cap_csim"), ((0, 1), (1, 0)))
+def test_zero_dependency_cap_fails_boot(dep_cap_rsim: int, dep_cap_csim: int) -> None:
+    with pytest.raises(ValidationError):
+        WorkerSettings(
+            database_url=_DSN,
+            restaurant_base_url=_RSIM,
+            dep_cap_rsim=dep_cap_rsim,
+            dep_cap_csim=dep_cap_csim,
+        )
+
+
 def test_prefixed_env_wrong_defaults_fail_boot(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("WORKER_DATABASE_URL", _DSN)
     monkeypatch.setenv("WORKER_RESTAURANT_BASE_URL", _RSIM)

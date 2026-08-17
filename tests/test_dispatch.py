@@ -279,7 +279,7 @@ def test_dispatch_uses_stored_key_and_schedules_ride_at_eta(
 
     assert len(courier.accept_calls) == 1
     assert courier.accept_calls[0][0] == stored_key
-    assert courier.accept_calls[0][1]["band"] == "near"
+    assert courier.accept_calls[0][1] == {"order_id": str(order_id)}
     with session_factory() as session:
         order = session.get(Order, order_id)
         dispatch_item = session.get(WorkItem, item_id)

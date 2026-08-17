@@ -17,8 +17,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from order_pipeline.cancel import CAUSE_CANCEL, CancelOutcome, OrderNotFound, cancel_order
 from order_pipeline.intake import place_order
+from order_pipeline.lifecycle import CAUSE_INVALID
 from order_pipeline.models import Order, OrderEvent, WorkItem
-from order_pipeline.worker.finalize import CAUSE_INVALID
 from tests.sim_admin import mix_off
 
 TTL_HOURS = 48

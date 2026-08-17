@@ -25,6 +25,10 @@ services:
       API_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/order_pipeline
       API_RESTAURANT_ADMIN_URL: http://restaurant:8081
       API_COURIER_ADMIN_URL: http://courier:8082
+      API_WORKER_REPLICAS: ${ORDER_PIPELINE_WORKER_REPLICAS:-2}
+      API_WORKER_DEP_CAP_RSIM: ${ORDER_PIPELINE_DEP_CAP_RSIM:-8}
+      API_WORKER_DEP_CAP_CSIM: ${ORDER_PIPELINE_DEP_CAP_CSIM:-8}
+      API_WORKER_TASK_CAPACITY: ${ORDER_PIPELINE_TASK_CAPACITY:-24}
     depends_on:
       postgres:
         condition: service_healthy
@@ -97,6 +101,10 @@ services:
       WORKER_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/order_pipeline
       WORKER_RESTAURANT_BASE_URL: http://restaurant:8081
       WORKER_COURIER_BASE_URL: http://courier:8082
+      WORKER_CONFIRM_DEADLINE_S: ${ORDER_PIPELINE_CONFIRM_DEADLINE_S:-120}
+      WORKER_DEP_CAP_RSIM: ${ORDER_PIPELINE_DEP_CAP_RSIM:-8}
+      WORKER_DEP_CAP_CSIM: ${ORDER_PIPELINE_DEP_CAP_CSIM:-8}
+      WORKER_TASK_CAPACITY: ${ORDER_PIPELINE_TASK_CAPACITY:-24}
     depends_on:
       postgres:
         condition: service_healthy
@@ -108,7 +116,7 @@ services:
         condition: service_healthy
     restart: "no"
     deploy:
-      replicas: 2
+      replicas: ${ORDER_PIPELINE_WORKER_REPLICAS:-2}
     healthcheck:
       test:
         [
@@ -131,6 +139,7 @@ services:
       SKIP_MIGRATIONS: "1"
       LOADGEN_API_BASE_URL: http://api:8000
       LOADGEN_RESTAURANT_ADMIN_URL: http://restaurant:8081
+      LOADGEN_CONFIRM_DEADLINE_S: ${ORDER_PIPELINE_CONFIRM_DEADLINE_S:-120}
     depends_on:
       api:
         condition: service_healthy

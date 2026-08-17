@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from order_pipeline.cancel import CancelOutcome, cancel_order
 from order_pipeline.intake import place_order
+from order_pipeline.lifecycle import CAUSE_INVALID
 from order_pipeline.models import Attempt, Order, OrderEvent, WorkItem
 from order_pipeline.worker.backoff import full_jitter_delay_s
 from order_pipeline.worker.chassis import Worker
@@ -30,9 +31,10 @@ from order_pipeline.worker.classify import (
 from order_pipeline.worker.counters import WorkerCounters
 from order_pipeline.worker.deps import DepCaps
 from order_pipeline.worker.finalize import (
-    CAUSE_INVALID,
     CAUSE_PERMANENT_4XX,
     CAUSE_SUPERSEDED,
+    PARK_NEXT_ACTION_GUARD_REJECTED,
+    PARK_REASON_GUARD_REJECTED,
     finalize_claim,
 )
 from order_pipeline.worker.http import courier_base_url
@@ -242,8 +244,11 @@ def test_stale_version_zero_rows_counts_invalid_and_appends_evidence(
         assert attempt is not None
         assert order.state == stale_state
         assert order.version == stale_version
-        assert item.status == "failed"
+        assert item.status == "parked"
         assert item.lease_owner is None
+        assert item.park_owner == "worker-a"
+        assert item.park_reason == PARK_REASON_GUARD_REJECTED
+        assert item.park_next_action == PARK_NEXT_ACTION_GUARD_REJECTED
         assert attempt.outcome == "ok"
         evidence = session.scalars(
             select(OrderEvent).where(OrderEvent.order_id == order_id, OrderEvent.applied.is_(False))
@@ -251,6 +256,55 @@ def test_stale_version_zero_rows_counts_invalid_and_appends_evidence(
         assert len(evidence) == 1
         assert evidence[0].cause == CAUSE_INVALID
         assert evidence[0].to_state == "confirmed"
+
+
+def test_illegal_transition_is_rejected_before_guarded_update_and_parks_work(
+    session_factory: sessionmaker[Session],
+) -> None:
+    order_id, item_id, _ = _seed_confirm(session_factory)
+    now = datetime.now(UTC)
+    counters = WorkerCounters()
+
+    with session_factory.begin() as session:
+        claimed = _claim(session, item_id, now=now, worker_id="worker-a")
+        assert claimed is not None
+
+    with session_factory.begin() as session:
+        finalize_claim(
+            session,
+            claimed,
+            HandlerResult(
+                outcome="ok",
+                transition=GuardedTransition(
+                    expected_state="placed",
+                    to_state="delivered",
+                    cause="bad_handler_result",
+                ),
+            ),
+            settings=_settings(),
+            counters=counters,
+            now=now,
+            rng=random.Random(0),
+        )
+
+    assert counters.invalid_transitions == 1
+    with session_factory() as session:
+        order = session.get(Order, order_id)
+        item = session.get(WorkItem, item_id)
+        assert order is not None
+        assert item is not None
+        assert order.state == "placed"
+        assert order.version == 1
+        assert item.status == "parked"
+        assert item.park_owner == "worker-a"
+        assert item.park_reason == PARK_REASON_GUARD_REJECTED
+        assert item.park_next_action == PARK_NEXT_ACTION_GUARD_REJECTED
+        evidence = session.scalars(
+            select(OrderEvent).where(OrderEvent.order_id == order_id, OrderEvent.applied.is_(False))
+        ).one()
+        assert evidence.from_state == "placed"
+        assert evidence.to_state == "delivered"
+        assert evidence.cause == CAUSE_INVALID
 
 
 def test_cancelled_zero_rows_is_supersession_not_invalid(

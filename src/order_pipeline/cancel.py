@@ -10,12 +10,11 @@ from uuid import UUID
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from order_pipeline.lifecycle import CAUSE_INVALID, is_legal_transition
 from order_pipeline.models import Order, OrderEvent, WorkItem
-from order_pipeline.worker.finalize import CAUSE_INVALID
 
 CAUSE_CANCEL = "cancel"
 ACTOR_API = "api"
-LEGAL_FROM = ("placed", "confirmed")
 
 
 class OrderNotFound(Exception):
@@ -68,7 +67,7 @@ def cancel_order(
         raise OrderNotFound()
     if order.state == "cancelled":
         return CancelResult(order=order, outcome=CancelOutcome.REPLAY)
-    if order.state not in LEGAL_FROM:
+    if not is_legal_transition(order.state, "cancelled"):
         session.add(
             OrderEvent(
                 order_id=order.id,

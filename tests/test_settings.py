@@ -29,6 +29,12 @@ def test_code_defaults() -> None:
     assert settings.worker_dep_cap_rsim == 8
     assert settings.worker_dep_cap_csim == 8
     assert settings.worker_task_capacity == 24
+    assert settings.database_pool_size == 36
+
+
+def test_database_pool_tracks_door_capacity_with_control_plane_headroom() -> None:
+    settings = APISettings(database_url=_DSN, accept_concurrency=7)
+    assert settings.database_pool_size == 11
 
 
 def test_unprefixed_env_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:

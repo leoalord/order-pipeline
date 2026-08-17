@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -15,11 +16,12 @@ from order_pipeline.api.snapshot import (
     fetch_ledger_counts,
     order_id_from_ledger_key,
     percentile,
+    retry_attempt_ids,
 )
 from order_pipeline.intake import confirm_idempotency_key, place_order
+from order_pipeline.lifecycle import CAUSE_INVALID
 from order_pipeline.models import Attempt, Order, OrderEvent, WorkItem
 from order_pipeline.worker.dispatch import dispatch_idempotency_key
-from order_pipeline.worker.finalize import CAUSE_INVALID
 
 TTL_HOURS = 48
 
@@ -228,6 +230,15 @@ def test_snapshot_splits_sim_errors_and_reports_honest_fleet_slot_totals(
                         outcome=outcome,
                     )
                 )
+            session.add(
+                Attempt(
+                    work_item_id=kitchen.id,
+                    started_at=now - timedelta(seconds=61),
+                    ended_at=now - timedelta(seconds=61),
+                    lease_owner="worker-old",
+                    outcome="http_5xx",
+                )
+            )
             session.flush()
 
             snap = build_snapshot(session, cohort_id=cohort, now=now, ledger_counts=())
@@ -256,6 +267,67 @@ def test_snapshot_splits_sim_errors_and_reports_honest_fleet_slot_totals(
         "cap": 48,
         "per_worker_cap": 24,
     }
+
+
+def test_retry_metrics_exclude_successful_polling_and_count_fault_reexecution(
+    session_factory: sessionmaker[Session],
+) -> None:
+    cohort = uuid.uuid4()
+    now = datetime.now(UTC)
+    with session_factory.begin() as session:
+        order = _place(session, cohort_id=cohort)
+        confirm = session.scalars(select(WorkItem).where(WorkItem.order_id == order.id)).one()
+        confirm.status = "completed"
+        poll = WorkItem(
+            order_id=order.id,
+            work_type="poll_cook",
+            status="pending",
+            idempotency_key=f"poll-metrics-{order.id}",
+            attempt_count=4,
+            next_attempt_at=now,
+        )
+        dispatch = WorkItem(
+            order_id=order.id,
+            work_type="dispatch",
+            status="pending",
+            idempotency_key=f"dispatch-metrics-{order.id}",
+            attempt_count=2,
+            next_attempt_at=now,
+        )
+        session.add_all([poll, dispatch])
+        session.flush()
+
+        rows = [
+            Attempt(
+                work_item_id=poll.id,
+                started_at=now - timedelta(seconds=6 - index),
+                ended_at=now,
+                lease_owner="worker-a",
+                outcome=outcome,
+            )
+            for index, outcome in enumerate(("ok", "ok", "timeout", "ok"))
+        ]
+        rows.extend(
+            [
+                Attempt(
+                    work_item_id=dispatch.id,
+                    started_at=now - timedelta(seconds=2 - index),
+                    ended_at=now,
+                    lease_owner="worker-b",
+                    outcome=outcome,
+                )
+                for index, outcome in enumerate(("http_5xx", "ok"))
+            ]
+        )
+        session.add_all(rows)
+        session.flush()
+
+        retries = retry_attempt_ids(rows)
+        snap = build_snapshot(session, cohort_id=cohort, now=now, ledger_counts=())
+
+    assert retries == {rows[3].id, rows[5].id}
+    assert snap.duplicate_attempts == 2
+    assert snap.retry_rate == pytest.approx(2 / 6)
 
 
 def test_snapshot_stages_split_queued_confirmed_from_cooking_being_prepared(

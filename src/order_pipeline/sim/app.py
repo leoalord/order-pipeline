@@ -23,6 +23,13 @@ IdempotencyKeyHeader = Annotated[
 
 
 def mount_sim_routes(app: FastAPI, core: SimCore) -> None:
+    def blackout_drop() -> DroppedResponse | None:
+        if not core.blackout_active():
+            return None
+        if core.blackout_hang_s > 0:
+            time.sleep(core.blackout_hang_s)
+        return DroppedResponse()
+
     @app.get("/health")
     def health() -> dict[str, str]:
         try:
@@ -55,18 +62,24 @@ def mount_sim_routes(app: FastAPI, core: SimCore) -> None:
         return JSONResponse(outcome.body, status_code=outcome.status_code)
 
     @app.get("/tickets/{ticket_id}")
-    def poll_ticket(ticket_id: str) -> dict[str, Any]:
+    def poll_ticket(ticket_id: str) -> Response:
+        unavailable = blackout_drop()
+        if unavailable is not None:
+            return unavailable
         ticket = core.poll(ticket_id)
         if ticket is None:
             raise HTTPException(status_code=404, detail="ticket not found")
-        return ticket
+        return JSONResponse(ticket)
 
     @app.get("/keys/{idempotency_key}")
-    def get_by_key(idempotency_key: str) -> dict[str, Any]:
+    def get_by_key(idempotency_key: str) -> Response:
+        unavailable = blackout_drop()
+        if unavailable is not None:
+            return unavailable
         ticket = core.get_by_key(idempotency_key)
         if ticket is None:
             raise HTTPException(status_code=404, detail="key not found")
-        return ticket
+        return JSONResponse(ticket)
 
     app.include_router(admin_router(core))
 

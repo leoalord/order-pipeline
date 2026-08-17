@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   fetchLoadgenStatus,
@@ -23,43 +23,63 @@ export function HomePage() {
   const [error, setError] = useState<string | null>(null);
   const [orderId, setOrderId] = useState("");
   const [cohortId, setCohortId] = useState<string | null>(null);
+  const cohortIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
     let timer: number | undefined;
 
     const poll = async () => {
+      let activeCohort = cohortIdRef.current ?? undefined;
+      let loadgenWarning: string | null = null;
       try {
         // Each tab discovers the loadgen's current cohort independently. There is
         // no cross-tab React state for New cohort to keep in sync.
-        const loadgen = await fetchLoadgenStatus(controller.signal);
+        try {
+          const loadgen = await fetchLoadgenStatus(controller.signal);
+          activeCohort = loadgen.cohort_id;
+        } catch (err) {
+          if (controller.signal.aborted) {
+            return;
+          }
+          loadgenWarning =
+            err instanceof Error
+              ? `${err.message}; showing the last known cohort`
+              : "loadgen status unavailable; showing the last known cohort";
+        }
         const body = await fetchSnapshot({
-          cohortId: loadgen.cohort_id,
+          cohortId: activeCohort,
           orderId: ORDER_ID_RE.test(orderId.trim()) ? orderId.trim() : undefined,
           signal: controller.signal,
         });
         if (!controller.signal.aborted) {
           setSnapshot(body);
-          setCohortId(loadgen.cohort_id);
-          setError(null);
+          cohortIdRef.current = body.cohort_id;
+          setCohortId(body.cohort_id);
+          setError(loadgenWarning);
         }
       } catch (err) {
         if (controller.signal.aborted) {
           return;
         }
         setError(err instanceof Error ? err.message : "snapshot poll failed");
+      } finally {
+        if (!controller.signal.aborted) {
+          // Schedule after completion so a slow snapshot cannot overlap the
+          // next poll and amplify pressure on the API during the demo.
+          timer = window.setTimeout(() => {
+            void poll();
+          }, POLL_MS);
+        }
       }
     };
 
     void poll();
-    timer = window.setInterval(() => {
-      void poll();
-    }, POLL_MS);
 
     return () => {
       controller.abort();
       if (timer !== undefined) {
-        window.clearInterval(timer);
+        window.clearTimeout(timer);
       }
     };
   }, [orderId]);
@@ -222,8 +242,8 @@ export function HomePage() {
             <h3>retry rate</h3>
             <p className="metric">{fmt(snapshot?.retry_rate)}</p>
             <p className="hint">
-              Fraction of attempts in the last 60s that are not the first
-              attempt on that work item.
+              Fraction of calls in the last 60s that follow a failed, unknown,
+              or abandoned call. Routine successful polls are excluded.
             </p>
           </article>
           <article className="card">
@@ -284,15 +304,15 @@ export function HomePage() {
                 <dd>{fmt(simHttp?.restaurant.latency_p95_s)}</dd>
               </div>
               <div>
-                <dt>timeout</dt>
+                <dt>timeout / 60s</dt>
                 <dd>{fmt(simHttp?.restaurant.timeout)}</dd>
               </div>
               <div>
-                <dt>5xx</dt>
+                <dt>5xx / 60s</dt>
                 <dd>{fmt(simHttp?.restaurant.http_5xx)}</dd>
               </div>
               <div>
-                <dt>429</dt>
+                <dt>429 / 60s</dt>
                 <dd>{fmt(simHttp?.restaurant.http_429)}</dd>
               </div>
             </dl>
@@ -314,15 +334,15 @@ export function HomePage() {
                 <dd>{fmt(simHttp?.courier.latency_p95_s)}</dd>
               </div>
               <div>
-                <dt>timeout</dt>
+                <dt>timeout / 60s</dt>
                 <dd>{fmt(simHttp?.courier.timeout)}</dd>
               </div>
               <div>
-                <dt>5xx</dt>
+                <dt>5xx / 60s</dt>
                 <dd>{fmt(simHttp?.courier.http_5xx)}</dd>
               </div>
               <div>
-                <dt>429</dt>
+                <dt>429 / 60s</dt>
                 <dd>{fmt(simHttp?.courier.http_429)}</dd>
               </div>
             </dl>
@@ -330,9 +350,9 @@ export function HomePage() {
           <article className="card">
             <h3>outbound slots — fleet</h3>
             <p className="hint">
-              Active leases vs cap across {fmt(outboundSlots?.worker_replicas)}
-              workers. Per-worker defaults are restaurant 8, courier 8, task
-              24; the honest demo totals are 16 / 16 / 48.
+              Active leases vs configured cap: {fmt(outboundSlots?.worker_replicas)}
+              workers × the reported per-worker limit. This is configured
+              topology, not live replica discovery.
             </p>
             <dl>
               <div>
@@ -369,19 +389,21 @@ export function HomePage() {
             <h3>conservation residual</h3>
             <p className="metric">{fmt(conservation?.residual)}</p>
             <p className="hint">
-              0 means the books balance. accepted {fmt(conservation?.accepted)}{" "}
+              State-partition check: accepted {fmt(conservation?.accepted)}{" "}
               = delivered {fmt(conservation?.delivered)} + cancelled{" "}
               {fmt(conservation?.cancelled)} + failed {fmt(conservation?.failed)}{" "}
               + in_flight {fmt(conservation?.in_flight)}; parked{" "}
               {fmt(conservation?.parked)} ⊂ in_flight. Parked work is stalled,
-              not a stage.
+              not a stage. This reconciles current rows; the event mismatch card
+              is the independent history check.
             </p>
           </article>
           <article className="card">
             <h3>duplicate attempts vs duplicate effects</h3>
             <p className="hint">
-              Extra worker calls vs extra tickets in the sim ledgers. Effects
-              must stay 0. A dash means a sim ledger could not be read.
+              Re-executions after failed, unknown, or abandoned calls vs extra
+              tickets in the sim ledgers. Routine successful polls are excluded;
+              effects must stay 0. A dash means a sim ledger could not be read.
             </p>
             <dl>
               <div>

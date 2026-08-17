@@ -44,10 +44,10 @@ def _order(order_id: uuid.UUID) -> dict[str, Any]:
 
 
 @pytest.mark.slow
-def test_doomed_ids_fail_at_deadlines_while_untagged_confirm_recovers(
+def test_doomed_ids_fail_through_blackout_while_untagged_confirm_recovers(
     session_factory: sessionmaker[Session],
 ) -> None:
-    """The deterministic explicit-fail set is independent of global blackout."""
+    """Targeted 120s failures coexist with and outlive the 60s global blackout."""
     _http("POST", f"{LOADGEN_URL}/stop", timeout=15)
     mix_off(RSIM_URL, CSIM_URL)
     minted = _http("POST", f"{LOADGEN_URL}/cohort/new")
@@ -91,6 +91,19 @@ def test_doomed_ids_fail_at_deadlines_while_untagged_confirm_recovers(
                 seconds=120
             )
 
+        blackout = _http(
+            "POST",
+            f"{RSIM_URL}/admin/faults",
+            json={"mode": "blackout", "seconds": 60},
+        )
+        assert blackout.status_code == 200, blackout.text
+        blackout_body = blackout.json()
+        assert blackout_body["mode"] == "blackout"
+        assert blackout_body["blackout_remaining_s"] > 0
+        assert {target["idempotency_key"] for target in blackout_body["confirm_unavailable"]} == {
+            confirm_idempotency_key(order_id) for order_id in order_ids
+        }
+
         ordinary = _http(
             "POST",
             f"{API_URL}/orders",
@@ -99,7 +112,12 @@ def test_doomed_ids_fail_at_deadlines_while_untagged_confirm_recovers(
         )
         assert ordinary.status_code == 201, ordinary.text
         ordinary_id = uuid.UUID(ordinary.json()["id"])
-        ordinary_deadline = time.monotonic() + 30
+        # This order is accepted during the blackout, remains durable/placed,
+        # then confirms after the global outage expires. The targeted keys stay
+        # unavailable until their separate accepted_at + 120s deadlines.
+        time.sleep(3)
+        assert _order(ordinary_id)["state"] == "placed"
+        ordinary_deadline = time.monotonic() + 90
         ordinary_state = "placed"
         while time.monotonic() < ordinary_deadline:
             ordinary_state = _order(ordinary_id)["state"]

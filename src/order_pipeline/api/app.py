@@ -25,7 +25,13 @@ from order_pipeline.intake import (
 from order_pipeline.models import Order
 
 settings = APISettings()
-engine: Engine = create_engine(settings.database_url)
+# Every request admitted through the door must be able to reach Postgres. The
+# derived pool also keeps headroom for health, snapshot, lookup, and cancel.
+engine: Engine = create_engine(
+    settings.database_url,
+    pool_size=settings.database_pool_size,
+    max_overflow=0,
+)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 door = DoorCap(settings.accept_concurrency)
 door_rejects = CohortRejects()
