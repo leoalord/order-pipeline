@@ -28,7 +28,12 @@ from order_pipeline.intake import (
     replay_existing,
 )
 from order_pipeline.models import Order
-from order_pipeline.redrive import WorkItemNotFound, WorkItemNotParked, redrive_work_item
+from order_pipeline.redrive import (
+    WorkItemNotFound,
+    WorkItemNotParked,
+    WorkItemOrderTerminal,
+    redrive_work_item,
+)
 
 settings = APISettings()
 # Every request admitted through the door must be able to reach Postgres. The
@@ -206,3 +211,8 @@ def post_redrive(work_item_id: UUID) -> RedriveResponse:
         raise HTTPException(status_code=404, detail="work item not found") from exc
     except WorkItemNotParked as exc:
         raise HTTPException(status_code=409, detail="work item is not parked") from exc
+    except WorkItemOrderTerminal as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="work item belongs to a terminal order",
+        ) from exc

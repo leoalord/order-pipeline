@@ -10,8 +10,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from order_pipeline.intake import place_order
-from order_pipeline.models import Attempt, WorkItem
-from order_pipeline.redrive import WorkItemNotFound, WorkItemNotParked, redrive_work_item
+from order_pipeline.models import Attempt, Order, WorkItem
+from order_pipeline.redrive import (
+    WorkItemNotFound,
+    WorkItemNotParked,
+    WorkItemOrderTerminal,
+    redrive_work_item,
+)
 
 TTL_HOURS = 48
 
@@ -97,3 +102,26 @@ def test_redrive_rejects_missing_and_nonparked_items(
         item = session.scalars(select(WorkItem).where(WorkItem.order_id == order.id)).one()
         with pytest.raises(WorkItemNotParked):
             redrive_work_item(session, item.id, now=now)
+
+
+@pytest.mark.parametrize("terminal_state", ["delivered", "cancelled", "failed"])
+def test_redrive_rejects_parked_work_for_terminal_order(
+    session_factory: sessionmaker[Session],
+    terminal_state: str,
+) -> None:
+    now = datetime.now(UTC)
+    with session_factory.begin() as session:
+        item_id, _, order_id = _parked_item(session, now=now)
+        order = session.get(Order, order_id)
+        assert order is not None
+        order.state = terminal_state
+
+    with session_factory.begin() as session:
+        with pytest.raises(WorkItemOrderTerminal):
+            redrive_work_item(session, item_id, now=now)
+
+    with session_factory() as session:
+        stored = session.get(WorkItem, item_id)
+        assert stored is not None
+        assert stored.status == "parked"
+        assert stored.attempt_count == 5

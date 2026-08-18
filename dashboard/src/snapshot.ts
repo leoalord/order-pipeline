@@ -95,6 +95,14 @@ export type ParkedRow = {
   next_action: string | null;
 };
 
+export type LeasedRow = {
+  id: string;
+  order_id: string;
+  work_type: string;
+  owner: string | null;
+  lease_until: string;
+};
+
 export type SimHttpLane = {
   requests_per_min: number;
   latency_p50_s: number | null;
@@ -139,6 +147,7 @@ export type Snapshot = {
   invalid_transitions: number;
   state_vs_last_order_events_mismatches: number;
   currently_leased: number;
+  currently_leased_items: LeasedRow[];
   trace: OrderTrace | null;
   accept_reject: AcceptReject;
   backlog: Record<string, number>;

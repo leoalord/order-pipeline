@@ -5,7 +5,6 @@ from __future__ import annotations
 import subprocess
 import time
 import uuid
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -120,12 +119,8 @@ def _ledger_count(base_url: str, key: str) -> int:
     return int(counts.get(key, 0))
 
 
-def _worker_container_for_owner(owner: str) -> str:
-    hostname = owner.partition(":")[0]
-    ids = [value for value in _docker("ps", "-q", "worker").stdout.splitlines() if value]
-    matched = [container_id for container_id in ids if container_id.startswith(hostname)]
-    assert len(matched) == 1, f"lease owner {owner} did not map to one worker: {ids}"
-    return matched[0]
+def _container_owns(container_id: str, owner: str | None) -> bool:
+    return owner is not None and container_id.startswith(owner.partition(":")[0])
 
 
 def test_scenario_3_kill_resume_then_park_clear_redrive(
@@ -139,39 +134,46 @@ def test_scenario_3_kill_resume_then_park_clear_redrive(
         assert stopped.status_code == 200, stopped.text
         mix_off()
 
-        # Hold a real outbound confirm call open long enough to use currently_leased
-        # as the timing instrument. The selected container is the one named by the
-        # durable lease, making the automated kill deterministic.
+        # Use the same public instrument and Docker command as the live runbook:
+        # Watch identifies the worker that owns this order's lease, then that exact
+        # container is killed. No direct DB lookup chooses the victim.
+        worker_ids = [value for value in _docker("ps", "-q", "worker").stdout.splitlines() if value]
+        assert len(worker_ids) == 2
         post_sim_faults(RSIM_URL, {"mode": "blackout", "seconds": 30, "mix": "off"})
         crash_order_id = _place(cohort_id=crash_cohort, prefix="scenario3-crash")
         crash_item_id: uuid.UUID | None = None
         crash_owner: str | None = None
-        stored_confirm_key: str | None = None
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
             body = _snapshot(cohort_id=crash_cohort, order_id=crash_order_id)
-            if body["currently_leased"] < 1:
-                time.sleep(POLL_S)
-                continue
-            with session_factory() as session:
-                item = session.scalars(
-                    select(WorkItem).where(
-                        WorkItem.order_id == crash_order_id,
-                        WorkItem.status == "leased",
-                        WorkItem.lease_until > datetime.now(UTC),
-                    )
-                ).one_or_none()
-                if item is not None and item.lease_owner is not None:
-                    crash_item_id = item.id
-                    crash_owner = item.lease_owner
-                    stored_confirm_key = item.idempotency_key
-                    break
+            leased_rows = body["currently_leased_items"]
+            assert body["currently_leased"] == len(leased_rows)
+            selected = next(
+                (
+                    row
+                    for row in leased_rows
+                    if row["work_type"] == "confirm" and row["order_id"] == str(crash_order_id)
+                ),
+                None,
+            )
+            if selected is not None:
+                crash_item_id = uuid.UUID(selected["id"])
+                crash_owner = selected["owner"]
+                break
             time.sleep(POLL_S)
         assert crash_item_id is not None
         assert crash_owner is not None
-        assert stored_confirm_key == confirm_idempotency_key(crash_order_id)
+        killed_container = next(
+            (
+                container_id
+                for container_id in worker_ids
+                if _container_owns(container_id, crash_owner)
+            ),
+            None,
+        )
+        assert killed_container is not None
+        stored_confirm_key = confirm_idempotency_key(crash_order_id)
 
-        killed_container = _worker_container_for_owner(crash_owner)
         subprocess.run(
             ("docker", "kill", killed_container),
             check=True,
@@ -213,8 +215,10 @@ def test_scenario_3_kill_resume_then_park_clear_redrive(
 
         _docker("up", "-d", "worker")
         killed = False
-        worker_ids = [value for value in _docker("ps", "-q", "worker").stdout.splitlines() if value]
-        assert len(worker_ids) == 2
+        restarted_worker_ids = [
+            value for value in _docker("ps", "-q", "worker").stdout.splitlines() if value
+        ]
+        assert len(restarted_worker_ids) == 2
 
         _wait_order(
             crash_order_id,

@@ -89,6 +89,7 @@ def test_dashboard_serves_spa_and_control_load_group() -> None:
     assert "accept_reject" in home_src.text
     assert "http_429s" in home_src.text
     assert "outbound_slots" in home_src.text
+    assert "currently_leased_items" in home_src.text
     assert "http_5xx" in home_src.text
     assert "parked_list" in home_src.text
     assert "Redrive" in home_src.text
@@ -241,4 +242,5 @@ def test_one_order_walks_every_stage_on_slash_cards() -> None:
         assert f'"{label}"' in snap
     assert "STAGE_LABELS.map" in home
     assert "currently_leased" in home
+    assert "currently_leased_items" in home
     assert "state_vs_last_order_events_mismatches" in home

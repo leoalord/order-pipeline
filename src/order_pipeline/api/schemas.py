@@ -118,6 +118,14 @@ class ParkedRow(BaseModel):
     next_action: str | None
 
 
+class LeasedRow(BaseModel):
+    id: UUID
+    order_id: UUID
+    work_type: str
+    owner: str | None
+    lease_until: datetime
+
+
 class SimHttpLane(BaseModel):
     requests_per_min: float
     latency_p50_s: float | None
@@ -164,6 +172,7 @@ class SnapshotResponse(BaseModel):
     invalid_transitions: int
     state_vs_last_order_events_mismatches: int
     currently_leased: int
+    currently_leased_items: list[LeasedRow]
     trace: OrderTrace | None
     accept_reject: AcceptReject
     backlog: dict[str, int]

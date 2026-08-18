@@ -115,6 +115,7 @@ export function HomePage() {
   const simHttp = snapshot?.sim_http;
   const outboundSlots = snapshot?.outbound_slots;
   const parked = snapshot?.parked_list ?? [];
+  const leased = snapshot?.currently_leased_items ?? [];
   const noProgress = snapshot?.no_progress_beyond_threshold;
 
   return (
@@ -451,9 +452,20 @@ export function HomePage() {
             <h3>currently-leased</h3>
             <p className="metric">{fmt(snapshot?.currently_leased)}</p>
             <p className="hint">
-              Work items in the middle of an outbound call. 0 means the worker
-              is idle or down.
+              Work items in the middle of an outbound call. Record an order and
+              owner here before the scenario-3 Docker kill. 0 means the workers
+              are idle or down.
             </p>
+            {leased.length > 0 ? (
+              <ul className="leased-list">
+                {leased.map((row) => (
+                  <li key={row.id}>
+                    <code>{row.order_id}</code> · {row.work_type} · owner{" "}
+                    <code>{row.owner ?? "—"}</code>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
           </article>
           <article className="card">
             <h3>state-vs-last-event mismatch</h3>

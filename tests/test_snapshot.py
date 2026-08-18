@@ -132,6 +132,7 @@ def test_snapshot_fields_cohort_filter_and_trace_null_attempts(
     assert snap.invalid_transitions == 0
     assert snap.state_vs_last_order_events_mismatches == 0
     assert snap.currently_leased == 0
+    assert snap.currently_leased_items == []
     assert tuple(snap.stages) == STAGE_NAMES
     assert snap.stages["confirmed"] == 1
     assert snap.backlog["confirm"] == 1
@@ -441,6 +442,13 @@ def test_startup_scan_and_mismatch_and_leased_and_parked_outside(
             )
             assert snap.startup_scan == 1
             assert snap.currently_leased == 1
+            assert len(snap.currently_leased_items) == 1
+            leased_row = snap.currently_leased_items[0]
+            assert leased_row.id == live.id
+            assert leased_row.order_id == leased.id
+            assert leased_row.work_type == live.work_type
+            assert leased_row.owner == "worker-1"
+            assert leased_row.lease_until == live.lease_until
             assert snap.conservation.parked == 1
             assert snap.conservation.residual == 1
             assert snap.state_vs_last_order_events_mismatches >= 1

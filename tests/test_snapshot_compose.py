@@ -38,6 +38,7 @@ REQUIRED_FIELDS = (
     "invalid_transitions",
     "state_vs_last_order_events_mismatches",
     "currently_leased",
+    "currently_leased_items",
     "trace",
     "accept_reject",
     "backlog",
@@ -116,57 +117,6 @@ def _wait_state(order_id: uuid.UUID, wanted: frozenset[str], *, timeout_s: float
     pytest.fail(f"order {order_id} did not reach {wanted} within {timeout_s}s; last={last}")
 
 
-def _wait_delivered_with_shared_volume_redrive(
-    order_id: uuid.UUID,
-    *,
-    cohort_id: uuid.UUID,
-    timeout_s: float,
-) -> None:
-    """Finish a happy walk even if earlier tests temporarily filled the courier fleet.
-
-    Compose tests share sim ledgers. A legitimate five-429 dispatch park is an
-    operator-recoverable stall, not a failed happy path. Wait out the maximum
-    configured trip, then exercise this slice's clear-capacity Redrive path once.
-    """
-    deadline = time.monotonic() + timeout_s
-    parked_at: float | None = None
-    redriven = False
-    last = "placed"
-    while time.monotonic() < deadline:
-        got = _http("GET", f"{API_URL}/orders/{order_id}")
-        assert got.status_code == 200, got.text
-        last = got.json()["state"]
-        assert isinstance(last, str)
-        if last == "delivered":
-            return
-        if last in {"failed", "cancelled"}:
-            pytest.fail(f"order {order_id} left the path early: {last}")
-
-        body = _snapshot(cohort_id=cohort_id, order_id=order_id)
-        parked = next(
-            (
-                row
-                for row in body["parked_list"]
-                if row["order_id"] == str(order_id) and row["work_type"] == "dispatch"
-            ),
-            None,
-        )
-        if parked is not None and parked_at is None:
-            parked_at = time.monotonic()
-        if (
-            parked is not None
-            and parked_at is not None
-            and not redriven
-            and time.monotonic() - parked_at >= 40.0
-        ):
-            response = _http("POST", f"{API_URL}/work-items/{parked['id']}/redrive")
-            assert response.status_code == 200, response.text
-            assert response.json()["idempotency_key"] == dispatch_idempotency_key(order_id)
-            redriven = True
-        time.sleep(POLL_EVERY_S)
-    pytest.fail(f"order {order_id} did not deliver within {timeout_s}s; last={last}")
-
-
 def _ledger(url: str) -> dict[str, int]:
     response = _http("GET", f"{url}/admin/ledger")
     assert response.status_code == 200, response.text
@@ -210,11 +160,7 @@ def test_snapshot_walk_shows_every_named_stage(
     mix_off()
     cohort_id = uuid.uuid4()
     order_id = _place_chips(cohort_id=cohort_id, prefix="snap-walk")
-    _wait_delivered_with_shared_volume_redrive(
-        order_id,
-        cohort_id=cohort_id,
-        timeout_s=WALK_TIMEOUT_S,
-    )
+    _wait_state(order_id, frozenset({"delivered"}), timeout_s=WALK_TIMEOUT_S)
 
     body = _snapshot(cohort_id=cohort_id, order_id=order_id)
     _assert_lite_fields(body)

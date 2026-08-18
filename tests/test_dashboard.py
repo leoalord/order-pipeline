@@ -50,6 +50,9 @@ def test_dashboard_source_has_assignment_stage_cards_and_lite_fields() -> None:
     assert "stages?.[" in home
     assert "snapshot.stages" in home or "stages?.[" in home
     assert "currently_leased" in home
+    assert "currently_leased_items" in home
+    assert "row.order_id" in home
+    assert "row.owner" in home
     assert "state_vs_last_order_events_mismatches" in home
     assert "duplicate_attempts" in home
     assert "duplicate_effects" in home
