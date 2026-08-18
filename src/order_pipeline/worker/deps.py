@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 
 from order_pipeline.worker.settings import WorkerSettings
 
-RSIM_WORK_TYPES = frozenset({"confirm", "poll_cook"})
+RSIM_WORK_TYPES = frozenset({"confirm", "poll_cook", "void_ticket"})
 CSIM_WORK_TYPES = frozenset({"dispatch", "poll_ride"})
 
 

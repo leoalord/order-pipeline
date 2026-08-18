@@ -8,6 +8,11 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
 
+from order_pipeline.loadgen.cancel_race import (
+    CancelRaceError,
+    CancelRaceRunner,
+    HttpCancelRace,
+)
 from order_pipeline.loadgen.client import HttpPipelineClient, PipelineClient
 from order_pipeline.loadgen.doom_confirm import (
     DoomConfirmClient,
@@ -36,6 +41,7 @@ def create_app(
     *,
     client: PipelineClient | None = None,
     doom_client: DoomConfirmClient | None = None,
+    cancel_race: CancelRaceRunner | None = None,
 ) -> FastAPI:
     cfg = settings or LoadgenSettings()
     pipeline = client or HttpPipelineClient(
@@ -59,6 +65,12 @@ def create_app(
         if fixture_client is not None
         else None
     )
+    cancel_runner = cancel_race
+    if cancel_runner is None and client is None:
+        cancel_runner = HttpCancelRace(
+            cfg.api_base_url,
+            timeout_s=cfg.place_timeout_s,
+        )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -67,6 +79,8 @@ def create_app(
         await driver.aclose()
         if doom_fixture is not None:
             await doom_fixture.aclose()
+        if cancel_runner is not None:
+            await cancel_runner.aclose()
 
     app = FastAPI(title="Order Pipeline Loadgen", lifespan=lifespan)
     app.state.driver = driver
@@ -157,6 +171,15 @@ def create_app(
             "order_ids": [str(order_id) for order_id in result.order_ids],
             "cohort_id": str(result.cohort_id),
         }
+
+    @app.post("/beat/cancel-race")
+    async def cancel_race_beat() -> dict[str, Any]:
+        if cancel_runner is None:
+            raise HTTPException(status_code=503, detail="cancel-race client unavailable")
+        try:
+            return await cancel_runner.run(driver.cohort_id)
+        except CancelRaceError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     return app
 

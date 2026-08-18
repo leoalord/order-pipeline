@@ -1,4 +1,4 @@
-"""Pre-pivot diner cancel. Race vs in-flight confirm (void_ticket) stays in bonus A."""
+"""Pre-pivot diner cancel. In-flight confirm finalize enqueues void_ticket."""
 
 from __future__ import annotations
 

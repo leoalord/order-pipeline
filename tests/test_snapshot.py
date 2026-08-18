@@ -18,8 +18,8 @@ from order_pipeline.api.snapshot import (
     percentile,
     retry_attempt_ids,
 )
-from order_pipeline.intake import confirm_idempotency_key, place_order
-from order_pipeline.lifecycle import CAUSE_INVALID
+from order_pipeline.intake import confirm_idempotency_key, place_order, void_idempotency_key
+from order_pipeline.lifecycle import CAUSE_INVALID, CAUSE_ORPHANED
 from order_pipeline.models import Attempt, Order, OrderEvent, WorkItem
 from order_pipeline.worker.dispatch import dispatch_idempotency_key
 from tests.conftest import hold_unclaimable
@@ -132,6 +132,7 @@ def test_snapshot_fields_cohort_filter_and_trace_null_attempts(
     assert snap.duplicate_attempts == 1
     assert snap.duplicate_effects == 0
     assert snap.invalid_transitions == 0
+    assert snap.orphaned_tickets == 0
     assert snap.state_vs_last_order_events_mismatches == 0
     assert snap.currently_leased == 0
     assert snap.currently_leased_items == []
@@ -472,6 +473,51 @@ def test_startup_scan_and_mismatch_and_leased_and_parked_outside(
             assert snap.http_429s.door == 0
         finally:
             session.rollback()
+
+
+def test_void_ledger_keys_are_not_duplicate_effects() -> None:
+    order_id = uuid.uuid4()
+    restaurant = {
+        confirm_idempotency_key(order_id): 1,
+        void_idempotency_key(order_id): 1,
+    }
+    assert duplicate_effects_from_ledgers([restaurant], {order_id}) == 0
+
+
+def test_orphaned_tickets_are_cohort_filtered(session_factory: sessionmaker[Session]) -> None:
+    cohort = uuid.uuid4()
+    other = uuid.uuid4()
+    now = datetime.now(UTC)
+    with session_factory.begin() as session:
+        order = _place(session, cohort_id=cohort)
+        outsider = _place(session, cohort_id=other)
+        session.add(
+            OrderEvent(
+                order_id=order.id,
+                from_state="cancelled",
+                to_state="cancelled",
+                actor="worker",
+                cause=CAUSE_ORPHANED,
+                timestamp=now,
+                applied=False,
+            )
+        )
+        session.add(
+            OrderEvent(
+                order_id=outsider.id,
+                from_state="cancelled",
+                to_state="cancelled",
+                actor="worker",
+                cause=CAUSE_ORPHANED,
+                timestamp=now,
+                applied=False,
+            )
+        )
+        session.flush()
+        snap = build_snapshot(session, cohort_id=cohort, now=now, ledger_counts=())
+        hold_unclaimable(session, order.id, outsider.id)
+    assert snap.orphaned_tickets == 1
+    assert snap.invalid_transitions == 0
 
 
 def test_invalid_transition_events_are_counted(session_factory: sessionmaker[Session]) -> None:

@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse, Response
 
 from order_pipeline.restaurant.quote import quiet_cook_s, quote_accept
 from order_pipeline.restaurant.settings import RSIMSettings
 from order_pipeline.restaurant.status import kitchen_status
-from order_pipeline.sim.app import create_sim_app
+from order_pipeline.sim.app import IdempotencyKeyHeader, create_sim_app
 from order_pipeline.sim.core import Quote, QuoteError, SimCore
+from order_pipeline.sim.drop import DroppedResponse
 from order_pipeline.sim.faults import FaultState
 from order_pipeline.sim.ledger import Effect, EffectLedger
 
@@ -26,6 +29,8 @@ def _occupancy(
 ) -> list[tuple[datetime, datetime]]:
     windows: list[tuple[datetime, datetime]] = []
     for effect in ledger.list_effects():
+        if effect.payload.get("voided") is True or effect.payload.get("kind") == "void":
+            continue
         if effect.estimated_ready_at <= now:
             continue
         cook = _effect_cook_s(effect, cook_s=cook_s, extra_item_s=extra_item_s)
@@ -111,7 +116,26 @@ def build_app(
             settings.sim_timeout_s + 0.5 if blackout_hang_s is None else blackout_hang_s
         ),
     )
-    return create_sim_app(title="Restaurant sim", core=core)
+    app = create_sim_app(title="Restaurant sim", core=core)
+
+    @app.post("/void")
+    def post_void(
+        body: dict[str, Any],
+        idempotency_key: IdempotencyKeyHeader,
+    ) -> Response:
+        outcome = core.void(idempotency_key, body)
+        if outcome.action == "blackout":
+            if core.blackout_hang_s > 0:
+                time.sleep(core.blackout_hang_s)
+            return DroppedResponse()
+        if outcome.body is None:
+            raise HTTPException(
+                status_code=outcome.status_code,
+                detail=outcome.detail or "sim error",
+            )
+        return JSONResponse(outcome.body, status_code=outcome.status_code)
+
+    return app
 
 
 def create_app() -> FastAPI:

@@ -31,6 +31,8 @@ class KitchenClient(Protocol):
 
     async def get_by_key(self, idempotency_key: str) -> httpx.Response: ...
 
+    async def void(self, *, idempotency_key: str, body: dict[str, Any]) -> httpx.Response: ...
+
 
 def poll_cook_idempotency_key(order_id: UUID) -> str:
     """Queue identity for the poll_cook work item — not a restaurant HTTP key."""
@@ -216,3 +218,22 @@ class KitchenHandlers:
                 result_payload=payload,
             )
         return self._poll_again()
+
+    async def void_ticket(self, claimed: ClaimedWork) -> HandlerResult:
+        payload = _payload_dict(claimed)
+        body: dict[str, Any] = {}
+        accept_key = payload.get("accept_key")
+        ticket_id = payload.get("ticket_id")
+        if isinstance(accept_key, str) and accept_key:
+            body["accept_key"] = accept_key
+        if isinstance(ticket_id, str) and ticket_id:
+            body["ticket_id"] = ticket_id
+        response = await self.client.void(
+            idempotency_key=claimed.idempotency_key,
+            body=body,
+        )
+        outcome = classify_status(response.status_code)
+        if outcome != "ok":
+            return HandlerResult(outcome=outcome)
+        result = response.json() if response.content else payload
+        return HandlerResult(outcome="ok", result_payload=result)

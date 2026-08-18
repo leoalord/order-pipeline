@@ -14,7 +14,7 @@ from order_pipeline.sim.core import ExistingEffectConflict, SimCore
 class FaultsPost(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    mode: Literal["clear", "5xx_before", "5xx_after", "drop", "blackout"]
+    mode: Literal["clear", "5xx_before", "5xx_after", "drop", "blackout", "fail_void"]
     seconds: float | None = None
     mix: Literal["off", "on"] | None = None
 

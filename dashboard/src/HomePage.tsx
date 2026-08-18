@@ -451,6 +451,14 @@ export function HomePage() {
             </p>
           </article>
           <article className="card">
+            <h3>orphaned tickets</h3>
+            <p className="metric">{fmt(snapshot?.orphaned_tickets)}</p>
+            <p className="hint">
+              Kitchen tickets whose void exhausted after cancel won. The diner
+              book stays cancelled.
+            </p>
+          </article>
+          <article className="card">
             <h3>currently-leased</h3>
             <p className="metric">{fmt(snapshot?.currently_leased)}</p>
             <p className="hint">

@@ -181,6 +181,29 @@ def test_targeted_confirm_unavailable_is_per_key_and_expires_at_its_deadline(
     assert core.faults_view()["confirm_unavailable"] == []
 
 
+def test_fail_void_500s_void_then_clear(tmp_path: Path, clock: MutableClock) -> None:
+    core = _core(tmp_path, clock)
+    accepted = core.accept("k-confirm", {"items": ["chips"]})
+    assert accepted.status_code == 200
+    core.set_fault_command("fail_void")
+    assert core.faults_view()["mode"] == "fail_void"
+    still_accepts = core.accept("k-other", {"items": ["taco"]})
+    assert still_accepts.status_code == 200
+    failed = core.void("k-void", {"accept_key": "k-confirm"})
+    assert failed.action == "five_xx"
+    assert failed.status_code == 500
+    assert core.ledger.get_by_key("k-void") is None
+    cleared = core.set_fault_command("clear")
+    assert cleared["mode"] == "off"
+    voided = core.void("k-void", {"accept_key": "k-confirm"})
+    assert voided.status_code == 200
+    replay = core.void("k-void", {"accept_key": "k-confirm"})
+    assert replay.status_code == 200
+    original = core.ledger.get_by_key("k-confirm")
+    assert original is not None
+    assert original.payload.get("voided") is True
+
+
 def test_targeted_rule_aborts_for_existing_effect_and_clear_removes_rules(
     tmp_path: Path, clock: MutableClock
 ) -> None:

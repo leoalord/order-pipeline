@@ -271,6 +271,72 @@ class SimCore:
             return None
         return self._ticket_body(effect, now=self._now())
 
+    def void(self, idempotency_key: str, body: dict[str, Any]) -> AcceptOutcome:
+        """Stripe-style void under `(order_id, void)`. fail_void 500s before the write."""
+        with self._accept_lock:
+            return self._void_locked(idempotency_key, body)
+
+    def _void_locked(self, idempotency_key: str, body: dict[str, Any]) -> AcceptOutcome:
+        now = self._now()
+        mode = self.faults.effective_mode(now)
+        if mode is FaultMode.BLACKOUT:
+            return AcceptOutcome(
+                action="blackout",
+                status_code=0,
+                detail="injected blackout",
+            )
+        if mode is FaultMode.FAIL_VOID:
+            return AcceptOutcome(
+                action="five_xx",
+                status_code=500,
+                detail="injected fail_void",
+            )
+
+        existing = self.ledger.get_by_key(idempotency_key)
+        if existing is not None:
+            return AcceptOutcome(
+                action="replay",
+                status_code=200,
+                body=self._void_body(existing),
+            )
+
+        accept_key = body.get("accept_key")
+        ticket_id = body.get("ticket_id")
+        original: Effect | None = None
+        if isinstance(accept_key, str) and accept_key:
+            original = self.ledger.get_by_key(accept_key)
+        if original is None and isinstance(ticket_id, str) and ticket_id:
+            original = self.ledger.get_by_ticket(ticket_id)
+        if original is not None:
+            self.ledger.mark_voided(original.idempotency_key)
+
+        effect = Effect(
+            idempotency_key=idempotency_key,
+            ticket_id=str(uuid4()),
+            accepted_at=now,
+            estimated_ready_at=now,
+            payload={
+                "kind": "void",
+                "accept_key": original.idempotency_key if original is not None else accept_key,
+                "voided_ticket_id": original.ticket_id if original is not None else ticket_id,
+            },
+        )
+        inserted = self.ledger.insert(effect)
+        if not inserted:
+            raced = self.ledger.get_by_key(idempotency_key)
+            if raced is None:
+                return AcceptOutcome(
+                    action="reject",
+                    status_code=500,
+                    detail="ledger insert failed",
+                )
+            return AcceptOutcome(
+                action="replay",
+                status_code=200,
+                body=self._void_body(raced),
+            )
+        return AcceptOutcome(action="ok", status_code=200, body=self._void_body(effect))
+
     def _roll_mix(self) -> FaultMode | None:
         """Always-on mix: drop%, then 5xx% split before/after so after-effect is in the mix."""
         drop_pct = self._flaky_drop_pct
@@ -325,6 +391,18 @@ class SimCore:
         if started is not None:
             body["service_started_at"] = isoformat_z(started)
         return body
+
+    def _void_body(self, effect: Effect) -> dict[str, Any]:
+        voided_ticket = effect.payload.get("voided_ticket_id")
+        if isinstance(voided_ticket, str) and voided_ticket:
+            ticket_id = voided_ticket
+        else:
+            ticket_id = effect.ticket_id
+        return {
+            "ticket_id": ticket_id,
+            "voided": True,
+            "accepted_at": isoformat_z(effect.accepted_at),
+        }
 
 
 def _service_started_at(effect: Effect) -> datetime | None:

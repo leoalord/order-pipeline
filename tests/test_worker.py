@@ -16,7 +16,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from order_pipeline.cancel import CancelOutcome, cancel_order
-from order_pipeline.intake import place_order
+from order_pipeline.intake import place_order, void_idempotency_key
 from order_pipeline.lifecycle import CAUSE_INVALID
 from order_pipeline.models import Attempt, Order, OrderEvent, WorkItem
 from order_pipeline.worker.backoff import full_jitter_delay_s
@@ -46,6 +46,7 @@ from order_pipeline.worker.plugin import (
     WorkHandler,
 )
 from order_pipeline.worker.settings import WorkerSettings
+from tests.conftest import UNCLAIMABLE_AT, hold_unclaimable
 
 TTL_HOURS = 48
 TEST_DATABASE_URL = os.environ.get(
@@ -93,7 +94,8 @@ def _seed_confirm_row(
         ttl_hours=TTL_HOURS,
     )
     item = session.scalars(select(WorkItem).where(WorkItem.order_id == order.id)).one()
-    item.next_attempt_at = next_attempt_at
+    # Default far-future so live compose workers cannot steal before the test claims.
+    item.next_attempt_at = UNCLAIMABLE_AT if next_attempt_at is None else next_attempt_at
     session.flush()
     return order.id, item.id, item.idempotency_key
 
@@ -115,6 +117,10 @@ def _claim(
     worker_id: str,
     lease_s: float = 15.0,
 ) -> ClaimedWork | None:
+    item = session.get(WorkItem, item_id)
+    if item is not None:
+        item.next_attempt_at = now
+        session.flush()
     return claim_next(
         session,
         now=now,
@@ -354,6 +360,7 @@ def test_cancelled_zero_rows_is_supersession_not_invalid(
             now=now,
             rng=random.Random(0),
         )
+        hold_unclaimable(session, order_id)
 
     assert counters.invalid_transitions == 0
     with session_factory() as session:
@@ -372,6 +379,14 @@ def test_cancelled_zero_rows_is_supersession_not_invalid(
         ).all()
         assert len(evidence) == 1
         assert evidence[0].cause == CAUSE_SUPERSEDED
+        voids = session.scalars(
+            select(WorkItem).where(
+                WorkItem.order_id == order_id,
+                WorkItem.work_type == "void_ticket",
+            )
+        ).all()
+        assert len(voids) == 1
+        assert voids[0].idempotency_key == void_idempotency_key(order_id)
 
 
 def test_cancel_then_leased_retry_keeps_work_cancelled(
@@ -755,12 +770,13 @@ def test_csim_semaphore_respects_dep_cap_only() -> None:
 
 def test_eligible_types_excludes_full_dependency() -> None:
     caps = DepCaps(_settings(dep_cap_rsim=1, dep_cap_csim=1))
-    registered = ("confirm", "poll_cook", "dispatch", "poll_ride")
+    registered = ("confirm", "poll_cook", "void_ticket", "dispatch", "poll_ride")
     assert set(caps.eligible_types(registered)) == set(registered)
     caps.admit("confirm")
     eligible = caps.eligible_types(registered)
     assert "confirm" not in eligible
     assert "poll_cook" not in eligible
+    assert "void_ticket" not in eligible
     assert "dispatch" in eligible
     assert "poll_ride" in eligible
     caps.admit("dispatch")

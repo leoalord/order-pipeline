@@ -50,6 +50,7 @@ REQUIRED_FIELDS = (
     "sim_http",
     "outbound_slots",
     "no_progress_beyond_threshold",
+    "orphaned_tickets",
 )
 
 

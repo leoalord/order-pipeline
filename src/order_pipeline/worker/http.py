@@ -37,6 +37,14 @@ class RestaurantClient:
         # httpx encodes the space in `(order_id, confirm)`; do not pre-quote.
         return await self.request("GET", f"/keys/{idempotency_key}")
 
+    async def void(self, *, idempotency_key: str, body: dict[str, Any]) -> httpx.Response:
+        return await self.request(
+            "POST",
+            "/void",
+            headers={"Idempotency-Key": idempotency_key},
+            json=body,
+        )
+
     async def aclose(self) -> None:
         await self._client.aclose()
 

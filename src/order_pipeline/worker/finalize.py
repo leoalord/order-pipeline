@@ -6,10 +6,11 @@ import random
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from order_pipeline.lifecycle import CAUSE_INVALID, is_legal_transition
+from order_pipeline.intake import void_idempotency_key
+from order_pipeline.lifecycle import CAUSE_INVALID, CAUSE_ORPHANED, is_legal_transition
 from order_pipeline.models import Attempt, Order, OrderEvent, WorkItem
 from order_pipeline.worker.backoff import full_jitter_delay_s
 from order_pipeline.worker.classify import PERMANENT_OUTCOMES
@@ -35,6 +36,26 @@ CAUSE_CONFIRM_DEADLINE = "confirm_deadline"
 PARK_REASON_GUARD_REJECTED = "guarded_transition_rejected"
 PARK_NEXT_ACTION_GUARD_REJECTED = "inspect_then_redrive"
 TERMINAL_ORDER_STATES = frozenset({"delivered", "cancelled", "failed"})
+VOID_TICKET_WORK_TYPE = "void_ticket"
+
+
+def _orphan_if_void_exhausted(
+    claimed: ClaimedWork,
+    settings: WorkerSettings,
+    result: HandlerResult,
+) -> HandlerResult | None:
+    """Void exhaustion records an orphan; it must not park or fail the cancelled order."""
+    if claimed.work_type != VOID_TICKET_WORK_TYPE:
+        return None
+    budget = count_budget_for(claimed.work_type, settings)
+    if budget is None or not count_budget_exhausted(claimed.attempt_count, budget):
+        return None
+    payload = result.result_payload if isinstance(result.result_payload, dict) else {}
+    return HandlerResult(
+        outcome=result.outcome,
+        disposition=WorkDisposition.COMPLETE,
+        result_payload={**payload, "orphaned_ticket": True},
+    )
 
 
 def _park_if_budget_exhausted(
@@ -43,6 +64,8 @@ def _park_if_budget_exhausted(
     result: HandlerResult,
 ) -> HandlerResult | None:
     """Count-bounded stop rule. Applies to failed *and* successful not-ready retries."""
+    if claimed.work_type == VOID_TICKET_WORK_TYPE:
+        return None
     budget = count_budget_for(claimed.work_type, settings)
     if budget is None or not count_budget_exhausted(claimed.attempt_count, budget):
         return None
@@ -86,6 +109,12 @@ def apply_policy(
         )
 
     if result.outcome in PERMANENT_OUTCOMES:
+        if claimed.work_type == VOID_TICKET_WORK_TYPE:
+            return HandlerResult(
+                outcome=result.outcome,
+                disposition=WorkDisposition.COMPLETE,
+                result_payload=result.result_payload,
+            )
         return HandlerResult(
             outcome=result.outcome,
             disposition=WorkDisposition.FAIL_ORDER,
@@ -113,6 +142,10 @@ def apply_policy(
             park_next_action=result.park_next_action,
             next_attempt_at=result.next_attempt_at,
         )
+
+    orphaned = _orphan_if_void_exhausted(claimed, settings, result)
+    if orphaned is not None:
+        return orphaned
 
     parked = _park_if_budget_exhausted(claimed, settings, result)
     if parked is not None:
@@ -222,6 +255,35 @@ def apply_guarded_transition(
     return False
 
 
+def _is_orphan_payload(payload: object) -> bool:
+    return isinstance(payload, dict) and payload.get("orphaned_ticket") is True
+
+
+def _enqueue_void_ticket(
+    session: Session,
+    claimed: ClaimedWork,
+    policy: HandlerResult,
+    now: datetime,
+) -> None:
+    key = void_idempotency_key(claimed.order_id)
+    existing = session.scalars(
+        select(WorkItem).where(WorkItem.idempotency_key == key)
+    ).one_or_none()
+    if existing is not None:
+        return
+    session.add(
+        WorkItem(
+            order_id=claimed.order_id,
+            work_type=VOID_TICKET_WORK_TYPE,
+            status="pending",
+            idempotency_key=key,
+            attempt_count=0,
+            next_attempt_at=now,
+            payload=policy.result_payload,
+        )
+    )
+
+
 def _enqueue_next(session: Session, claimed: ClaimedWork, nxt: NextWork, now: datetime) -> None:
     session.add(
         WorkItem(
@@ -284,9 +346,21 @@ def finalize_claim(
         and policy.transition.to_state == order.state
         and order.state in TERMINAL_ORDER_STATES
     )
-    if order is not None and order.state in TERMINAL_ORDER_STATES and not just_applied_terminal:
+    if (
+        order is not None
+        and order.state in TERMINAL_ORDER_STATES
+        and not just_applied_terminal
+        and claimed.work_type != VOID_TICKET_WORK_TYPE
+    ):
         _release_lease(item)
         item.status = "cancelled"
+        if (
+            claimed.work_type in CONFIRM_WORK_TYPES
+            and order.state == "cancelled"
+            and policy.transition is not None
+            and not applied
+        ):
+            _enqueue_void_ticket(session, claimed, policy, now)
         return
 
     if not applied:
@@ -323,5 +397,15 @@ def finalize_claim(
     _release_lease(item)
     item.status = "completed"
     item.result = policy.result_payload
+    if claimed.work_type == VOID_TICKET_WORK_TYPE and _is_orphan_payload(policy.result_payload):
+        current = order.state if order is not None else claimed.order_state
+        _append_evidence(
+            session,
+            order_id=claimed.order_id,
+            from_state=current,
+            to_state=current,
+            cause=CAUSE_ORPHANED,
+            now=now,
+        )
     for nxt in policy.next_work:
         _enqueue_next(session, claimed, nxt, now)

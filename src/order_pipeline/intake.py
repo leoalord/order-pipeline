@@ -39,6 +39,11 @@ def confirm_idempotency_key(order_id: UUID) -> str:
     return f"({order_id}, confirm)"
 
 
+def void_idempotency_key(order_id: UUID) -> str:
+    """Stored unique key `(order_id, void)` for cancel-race compensation."""
+    return f"({order_id}, void)"
+
+
 def body_fingerprint(*, items: Sequence[str], cohort_id: UUID | None) -> str:
     """Canonical SHA-256 of the cart (and cohort when the client sent one)."""
     payload: dict[str, object] = {"items": list(items)}

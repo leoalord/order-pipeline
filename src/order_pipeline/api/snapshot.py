@@ -31,7 +31,7 @@ from order_pipeline.api.schemas import (
     TraceAttempt,
     TraceEvent,
 )
-from order_pipeline.lifecycle import CAUSE_INVALID
+from order_pipeline.lifecycle import CAUSE_INVALID, CAUSE_ORPHANED
 from order_pipeline.models import Attempt, Order, OrderEvent, WorkItem
 
 # Assignment names. Code stores being_prepared / out_for_delivery; JSON uses these keys.
@@ -58,7 +58,7 @@ RATE_WINDOW = timedelta(seconds=60)
 NO_PROGRESS_THRESHOLD_S = 90.0
 BACKLOG_TYPES = ("confirm", "poll_cook", "dispatch", "poll_ride")
 BACKLOG_STATUSES = frozenset({"pending", "leased"})
-KITCHEN_WORK = frozenset({"confirm", "poll_cook", "submit"})
+KITCHEN_WORK = frozenset({"confirm", "poll_cook", "submit", "void_ticket"})
 COURIER_WORK = frozenset({"dispatch", "poll_ride"})
 UNKNOWN_TIMEOUT_OUTCOMES = frozenset({"timeout", "dropped", "unknown"})
 
@@ -87,8 +87,10 @@ def order_id_from_ledger_key(key: str) -> UUID | None:
     """Parse `({order_id}, confirm)` / `({order_id}, dispatch)` sim ledger keys."""
     if not (key.startswith("(") and key.endswith(")")):
         return None
-    head, sep, _tail = key[1:-1].partition(", ")
+    head, sep, tail = key[1:-1].partition(", ")
     if not sep:
+        return None
+    if tail == "void":
         return None
     try:
         return UUID(head)
@@ -286,9 +288,12 @@ def build_snapshot(
     delivered_at: dict[UUID, datetime] = {}
     last_applied: dict[UUID, OrderEvent] = {}
     invalid_transitions = 0
+    orphaned_tickets = 0
     for event in events:
         if event.cause == CAUSE_INVALID:
             invalid_transitions += 1
+        if event.cause == CAUSE_ORPHANED:
+            orphaned_tickets += 1
         if not event.applied:
             continue
         stamp = _aware(event.timestamp)
@@ -508,6 +513,7 @@ def build_snapshot(
             threshold_s=NO_PROGRESS_THRESHOLD_S,
             count=stalled,
         ),
+        orphaned_tickets=orphaned_tickets,
     )
 
 

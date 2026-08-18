@@ -341,3 +341,42 @@ def test_default_settings_show_mix_on(tmp_path: Path) -> None:
         on = test_client.post("/admin/faults", json={"mode": "clear", "mix": "on"})
         assert on.json()["mix"] == "on"
         assert on.json()["flaky_5xx_pct"] == 3.0
+
+
+def test_void_replays_and_fail_void_500s_until_clear(client: TestClient) -> None:
+    accept_key = f"unit-void-accept-{uuid.uuid4()}"
+    void_key = f"unit-void-{uuid.uuid4()}"
+    accepted = _accept(client, ["chips"], accept_key)
+    assert accepted.status_code == 200, accepted.text
+    ticket_id = accepted.json()["ticket_id"]
+
+    first = client.post(
+        "/void",
+        json={"accept_key": accept_key, "ticket_id": ticket_id},
+        headers={"Idempotency-Key": void_key},
+    )
+    assert first.status_code == 200, first.text
+    assert first.json()["voided"] is True
+    second = client.post(
+        "/void",
+        json={"accept_key": accept_key, "ticket_id": ticket_id},
+        headers={"Idempotency-Key": void_key},
+    )
+    assert second.status_code == 200, second.text
+    ledger = client.get("/admin/ledger")
+    assert ledger.json()["counts"][accept_key] == 1
+    assert ledger.json()["counts"][void_key] == 1
+
+    armed = client.post("/admin/faults", json={"mode": "fail_void"})
+    assert armed.status_code == 200, armed.text
+    assert armed.json()["mode"] == "fail_void"
+    still_accepts = _accept(client, ["taco"], f"unit-void-accept-2-{uuid.uuid4()}")
+    assert still_accepts.status_code == 200, still_accepts.text
+    failed = client.post(
+        "/void",
+        json={"accept_key": accept_key},
+        headers={"Idempotency-Key": f"unit-void-fail-{uuid.uuid4()}"},
+    )
+    assert failed.status_code == 500, failed.text
+    cleared = client.post("/admin/faults", json={"mode": "clear"})
+    assert cleared.json()["mode"] == "off"
