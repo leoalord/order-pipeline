@@ -184,7 +184,9 @@ export function ControlPage() {
         <p className="pane-intro">
           Cancel race places then cancels to collide with confirm. Fail void is
           sticky restaurant 500s on void — Abort with Clear restaurant (
-          <code>clear</code>).
+          <code>clear</code>). Out of stock zeros burrito; Place one burrito
+          order; Abort leftover 0 with Restore stock (
+          <code>count: 200</code>).
         </p>
         <div className="control-row">
           <button
@@ -200,6 +202,33 @@ export function ControlPage() {
             onClick={() => void run("/rsim/admin/faults", { mode: "fail_void" })}
           >
             Fail void
+          </button>
+          <button
+            type="button"
+            disabled={busy !== null}
+            onClick={() =>
+              void run("/rsim/admin/stock", { item: "burrito", count: 0 })
+            }
+          >
+            Out of stock
+          </button>
+          <button
+            type="button"
+            disabled={busy !== null}
+            onClick={() =>
+              void run("/loadgen/beat/place", { item: "burrito" })
+            }
+          >
+            Place
+          </button>
+          <button
+            type="button"
+            disabled={busy !== null}
+            onClick={() =>
+              void run("/rsim/admin/stock", { item: "burrito", count: 200 })
+            }
+          >
+            Restore stock
           </button>
         </div>
       </section>

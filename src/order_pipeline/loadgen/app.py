@@ -8,6 +8,11 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
 
+from order_pipeline.loadgen.beat_place import (
+    BeatPlaceError,
+    BeatPlaceRunner,
+    HttpBeatPlace,
+)
 from order_pipeline.loadgen.cancel_race import (
     CancelRaceError,
     CancelRaceRunner,
@@ -23,6 +28,7 @@ from order_pipeline.loadgen.doom_confirm import (
 )
 from order_pipeline.loadgen.driver import OpenLoopDriver
 from order_pipeline.loadgen.settings import LoadgenSettings
+from order_pipeline.menu import MENU_ITEM_IDS
 
 
 async def _read_json_object(request: Request) -> dict[str, Any]:
@@ -42,6 +48,7 @@ def create_app(
     client: PipelineClient | None = None,
     doom_client: DoomConfirmClient | None = None,
     cancel_race: CancelRaceRunner | None = None,
+    beat_place: BeatPlaceRunner | None = None,
 ) -> FastAPI:
     cfg = settings or LoadgenSettings()
     pipeline = client or HttpPipelineClient(
@@ -71,6 +78,12 @@ def create_app(
             cfg.api_base_url,
             timeout_s=cfg.place_timeout_s,
         )
+    place_runner = beat_place
+    if place_runner is None and client is None:
+        place_runner = HttpBeatPlace(
+            cfg.api_base_url,
+            timeout_s=cfg.place_timeout_s,
+        )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -81,6 +94,8 @@ def create_app(
             await doom_fixture.aclose()
         if cancel_runner is not None:
             await cancel_runner.aclose()
+        if place_runner is not None:
+            await place_runner.aclose()
 
     app = FastAPI(title="Order Pipeline Loadgen", lifespan=lifespan)
     app.state.driver = driver
@@ -179,6 +194,22 @@ def create_app(
         try:
             return await cancel_runner.run(driver.cohort_id)
         except CancelRaceError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/beat/place")
+    async def beat_place_order(request: Request) -> dict[str, Any]:
+        if place_runner is None:
+            raise HTTPException(status_code=503, detail="beat-place client unavailable")
+        body = await _read_json_object(request)
+        item = body.get("item")
+        if not isinstance(item, str) or item not in MENU_ITEM_IDS:
+            raise HTTPException(
+                status_code=422,
+                detail="item must be chips, taco, or burrito",
+            )
+        try:
+            return await place_runner.run(driver.cohort_id, item)
+        except BeatPlaceError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     return app

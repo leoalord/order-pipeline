@@ -112,6 +112,13 @@ def test_dashboard_serves_spa_and_control_load_group() -> None:
     assert "Crash assist" in control_src.text
     assert "/csim/admin/faults" in control_src.text
     assert "seconds: 30" in control_src.text
+    assert "Bonuses" in control_src.text
+    assert "Cancel race" in control_src.text
+    assert "Fail void" in control_src.text
+    assert "Out of stock" in control_src.text
+    assert "Restore stock" in control_src.text
+    assert "/loadgen/beat/place" in control_src.text
+    assert "/rsim/admin/stock" in control_src.text
     assert "kill" not in control_src.text.lower()
     assert "redrive" not in control_src.text.lower()
 
