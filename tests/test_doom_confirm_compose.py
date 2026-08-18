@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from order_pipeline.intake import confirm_idempotency_key
 from order_pipeline.models import Order, OrderEvent
-from tests.sim_admin import CSIM_URL, RSIM_URL, mix_off, post_sim_faults
+from tests.sim_admin import CSIM_URL, RSIM_URL, mix_off, mix_on
 
 API_URL = "http://localhost:8000"
 LOADGEN_URL = "http://localhost:8090"
@@ -165,5 +165,4 @@ def test_doomed_ids_fail_through_blackout_while_untagged_confirm_recovers(
         assert expired.json()["confirm_unavailable"] == []
         assert expired.json()["mode"] == "off"
     finally:
-        post_sim_faults(RSIM_URL, {"mode": "clear", "mix": "off"})
-        post_sim_faults(CSIM_URL, {"mode": "clear", "mix": "off"})
+        mix_on()

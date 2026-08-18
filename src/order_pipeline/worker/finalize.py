@@ -34,6 +34,7 @@ CAUSE_PERMANENT_4XX = "permanent_4xx"
 CAUSE_CONFIRM_DEADLINE = "confirm_deadline"
 PARK_REASON_GUARD_REJECTED = "guarded_transition_rejected"
 PARK_NEXT_ACTION_GUARD_REJECTED = "inspect_then_redrive"
+TERMINAL_ORDER_STATES = frozenset({"delivered", "cancelled", "failed"})
 
 
 def _park_if_budget_exhausted(
@@ -267,16 +268,32 @@ def finalize_claim(
     if policy.transition is not None:
         applied = apply_guarded_transition(session, claimed, policy.transition, counters, now)
 
+    # Cancel keeps lease_owner on in-flight work so this finalize can settle.
+    # Re-read the order after the guarded UPDATE: a leased RETRY/PARK has no
+    # transition, so the cancelled check must not live only inside `if not applied`.
+    # Do not SELECT FOR UPDATE the work item here — that would lock work_items
+    # before the order row and invert cancel/redrive (order, then work item).
+    # Skip only when the order is already terminal for a reason we did not just
+    # apply (cancel). A 4xx/deadline fail that we just wrote must still FAIL_ORDER.
+    order = session.get(Order, claimed.order_id)
+    just_applied_terminal = (
+        applied
+        and policy.transition is not None
+        and order is not None
+        and policy.transition.to_state == order.state
+        and order.state in TERMINAL_ORDER_STATES
+    )
+    if order is not None and order.state in TERMINAL_ORDER_STATES and not just_applied_terminal:
+        _release_lease(item)
+        item.status = "cancelled"
+        return
+
     if not applied:
         _release_lease(item)
-        order = session.get(Order, claimed.order_id)
-        if order is not None and order.state == "cancelled":
-            item.status = "cancelled"
-        else:
-            item.status = "parked"
-            item.park_owner = claimed.lease_owner
-            item.park_reason = PARK_REASON_GUARD_REJECTED
-            item.park_next_action = PARK_NEXT_ACTION_GUARD_REJECTED
+        item.status = "parked"
+        item.park_owner = claimed.lease_owner
+        item.park_reason = PARK_REASON_GUARD_REJECTED
+        item.park_next_action = PARK_NEXT_ACTION_GUARD_REJECTED
         return
 
     disposition = policy.disposition or WorkDisposition.COMPLETE

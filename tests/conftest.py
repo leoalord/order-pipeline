@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
+
+from order_pipeline.models import WorkItem
 
 # Compose publishes Postgres on a non-default loopback port so this cannot
 # collide with a Postgres already running on the host.
@@ -39,6 +43,19 @@ STATEFUL_COMPOSE_TEST_ORDER = (
     "tests/test_dinner_rush_compose.py::test_scenario_0_steady_walk_and_scenario_1_rush",
 )
 STATEFUL_COMPOSE_TESTS = frozenset(STATEFUL_COMPOSE_TEST_ORDER)
+
+# Live workers poll the same Postgres as session tests. Fixture rows that stay
+# pending/leased and due will be claimed and executed for real.
+UNCLAIMABLE_AT = datetime.now(UTC) + timedelta(days=36500)
+
+
+def hold_unclaimable(session: Session, *order_ids: UUID) -> None:
+    """Keep leftover fixture work out of the compose claimer."""
+    if not order_ids:
+        return
+    for item in session.scalars(select(WorkItem).where(WorkItem.order_id.in_(order_ids))):
+        if item.status in {"pending", "leased"}:
+            item.next_attempt_at = UNCLAIMABLE_AT
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
@@ -73,3 +90,12 @@ def db_engine() -> Iterator[Engine]:
 def session_factory(db_engine: Engine) -> sessionmaker[Session]:
     """Sessions behave like the API's: committed rows stay readable on the instance."""
     return sessionmaker(bind=db_engine, expire_on_commit=False)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def restore_demo_mix_after_suite() -> Iterator[None]:
+    """Happy-path tests turn the mix off; put the demo 3%/2% back when pytest exits."""
+    yield
+    from tests.sim_admin import restore_demo_mix
+
+    restore_demo_mix()

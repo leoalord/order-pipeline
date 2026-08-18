@@ -80,6 +80,7 @@ class TraceAttempt(BaseModel):
     ended_at: datetime | None
     lease_owner: str
     outcome: str | None
+    idempotency_key: str
 
 
 class OrderTrace(BaseModel):

@@ -57,6 +57,7 @@ export type TraceAttempt = {
   ended_at: string | null;
   lease_owner: string;
   outcome: string | null;
+  idempotency_key: string;
 };
 
 export type OrderTrace = {

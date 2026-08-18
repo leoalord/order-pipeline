@@ -170,7 +170,7 @@ docker compose ps -q worker | wc -l   # 2
 make check   # uv run ruff + mypy + pytest, plus dashboard tsc
 ```
 
-Dependencies are declared in `pyproject.toml` and locked in `uv.lock`. The dashboard is a separate Node/Vite app (`dashboard/`, `package-lock.json`). `make check` is the one command for lint, Python types, `tsc`, and tests. The health and place-order integration tests fail if the API or Postgres is down; restaurant tests fail if the sim on 8081 is down; courier tests fail if the sim on 8082 is down; worker tests fail if two worker replicas are not healthy; loadgen tests fail if 8090 is down; dashboard tests fail if the SPA on 5173 is down. After image changes, rebuild so compose serves the new image: `docker compose up --build --wait`.
+Dependencies are declared in `pyproject.toml` and locked in `uv.lock`. The dashboard is a separate Node/Vite app (`dashboard/`, `package-lock.json`). `make check` is the one command for lint, Python types, `tsc`, and tests. The health and place-order integration tests fail if the API or Postgres is down; restaurant tests fail if the sim on 8081 is down; courier tests fail if the sim on 8082 is down; worker tests fail if two worker replicas are not healthy; loadgen tests fail if 8090 is down; dashboard tests fail if the SPA on 5173 is down. After image changes, rebuild so compose serves the new image: `docker compose up --build --wait`. Happy-path tests turn the always-on mix off; pytest restores `{"mix":"on"}` (3% 5xx / 2% drop) when the suite exits so a later live demo still matches the pre-demo checklist. If a previous run left claimable fixture rows or a polluted volume, reset with `docker compose down -v` and bring the stack back up.
 
 Compose publishes Postgres on `127.0.0.1:55432` — loopback only, and off the default port so it cannot collide with a Postgres already running on the host. The direct-session tests connect there; override with `TEST_DATABASE_URL` if you need to. Because `001_full_schema` is edited in place rather than superseded, a database that already applied it will **not** pick up schema changes from `alembic upgrade head` — reset the volume with `docker compose down -v` after pulling schema work.
 
@@ -204,15 +204,22 @@ Rush assumes steady is already running and does **not** replay a minute of basel
 
 Scenario 2 keeps steady arrivals at **0.4×H**. On `/control`, click **Doom-confirm**, then **Restaurant blackout (60s)**; the latter posts exactly `{"mode":"blackout","seconds":60}` through `/rsim/admin/faults`. **Clear restaurant** posts `{"mode":"clear"}` to that same proxy. On `/`, Pipeline splits each sim's trailing-60-second timeout/unknown responses from 5xx and 429, and shows active outbound leases against the configured two-worker fleet caps: restaurant `used/16`, courier `used/16`, all tasks `used/48` (per-worker 8 / 8 / 24). The used values are live leases; caps come from deployment configuration rather than live replica discovery. Doom-confirm never goes through `/rsim`.
 
-Scenario 3 runs in two beats, in order. First, with steady arrivals still running, use Watch's currently-leased list to record an order id and its owner hostname. Match that hostname to the worker id from `docker compose ps -q worker`, then stop that exact worker **from the Docker terminal** while the lease is in flight:
+Scenario 3 runs in two beats, in order. First, with steady arrivals still running and the always-on mix **on**, arm a catchable lease with the existing **Restaurant blackout (60s)** button on `/control` (the Outage group — do not add this to Crash assist). A healthy confirm is milliseconds; blackout holds the outbound call for `sim_timeout_s + 0.5s` so the currently-leased card stays readable. Then record an order id and its owner hostname. Match that hostname to the worker id from `docker compose ps -q worker`, stop that exact worker **from the Docker terminal** while the lease is in flight, and **Clear restaurant** immediately after the kill:
 
 ```bash
+curl -sS -X POST http://localhost:8081/admin/faults \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"blackout","seconds":30}'
+# Read Watch's currently-leased card, then:
 docker kill <full-worker-id-whose-prefix-matches-the-visible-owner>
+curl -sS -X POST http://localhost:8081/admin/faults \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"clear"}'
 # Watch the recorded trace for the <=15s gap and survivor resume first, then:
 docker compose up -d worker
 ```
 
-The owner begins with the container hostname (the short prefix of the full id), so the row-to-container match is visible without a database query. The trace must retain the abandoned NULL-outcome attempt and add the survivor's new attempt; both use the same stored key. There is one applied confirm event, no lease-lifecycle `order_events`, and duplicate effects stays 0. Worker replica utilization 2 → 1 → 2 is read from `docker compose ps`, not a dashboard pane.
+The owner begins with the container hostname (the short prefix of the full id), so the row-to-container match is visible without a database query. Paste the order id: the trace shows the abandoned NULL-outcome attempt, the survivor's new attempt, both owners, both work-item ids, and the same stored `idempotency_key`. There is one applied confirm event, no lease-lifecycle `order_events`, and duplicate effects stays 0. Restaurant blackout is a pre-effect fault — the ledger row is written by the survivor. Timeline D (effect applied, response lost) is covered by `tests/test_confirm_faults.py`, not this beat. Worker replica utilization 2 → 1 → 2 is read from `docker compose ps`, not a dashboard pane.
 
 Second, click **Courier blackout (30s)** in `/control`. A dispatch exhausts its budget of 5 and appears in Watch's parked list while its order remains `ready`. Observe its owner, reason, and next action. Clear the courier fault (or wait for the timed blackout to expire), then press **Redrive** on that parked row:
 

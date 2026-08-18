@@ -17,7 +17,7 @@ from order_pipeline.api.snapshot import STAGE_NAMES, duplicate_effects_from_ledg
 from order_pipeline.intake import DEFAULT_COHORT_ID, confirm_idempotency_key
 from order_pipeline.models import Attempt, OrderEvent, WorkItem
 from order_pipeline.worker.dispatch import dispatch_idempotency_key
-from tests.sim_admin import mix_off
+from tests.sim_admin import mix_off, mix_on
 
 API_URL = "http://localhost:8000"
 RSIM_URL = "http://localhost:8081"
@@ -287,9 +287,7 @@ def test_snapshot_trace_retried_confirm_no_second_event(
         extras = duplicate_effects_from_ledgers([_ledger(RSIM_URL)], {order_id})
         assert body["duplicate_effects"] == extras
     finally:
-        cleared = _http("POST", f"{RSIM_URL}/admin/faults", json={"mode": "clear", "mix": "off"})
-        assert cleared.status_code == 200, cleared.text
-        assert cleared.json()["mode"] == "off"
+        mix_on()
 
 
 def test_snapshot_default_cohort_query_param_omitted() -> None:

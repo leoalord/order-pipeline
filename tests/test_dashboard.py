@@ -86,6 +86,11 @@ def test_dashboard_source_has_assignment_stage_cards_and_lite_fields() -> None:
     assert "redrive" in home.lower()
     assert "redriveWorkItem(row.id)" not in home
     assert "redrive(row.id)" in home
+    assert "attempt.lease_owner" in home
+    assert "attempt.idempotency_key" in home
+    assert "attempt.work_item_id" in home
+    assert "result.idempotency_key" in home
+    assert "redriving === row.id" in home
     assert "outbound slots" in home.lower()
     assert "configured cap" in home
     assert "not live replica discovery" in home

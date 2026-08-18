@@ -10,13 +10,10 @@ from typing import Any
 
 import httpx
 import pytest
-from sqlalchemy import select
-from sqlalchemy.orm import Session, sessionmaker
 
 from order_pipeline.intake import confirm_idempotency_key
-from order_pipeline.models import Attempt, OrderEvent, WorkItem
 from order_pipeline.worker.dispatch import dispatch_idempotency_key
-from tests.sim_admin import mix_off, post_sim_faults
+from tests.sim_admin import mix_off, mix_on, post_sim_faults
 
 API_URL = "http://localhost:8000"
 DASHBOARD_URL = "http://127.0.0.1:5173"
@@ -123,9 +120,33 @@ def _container_owns(container_id: str, owner: str | None) -> bool:
     return owner is not None and container_id.startswith(owner.partition(":")[0])
 
 
-def test_scenario_3_kill_resume_then_park_clear_redrive(
-    session_factory: sessionmaker[Session],
-) -> None:
+def _wait_parked_dispatch(
+    *,
+    cohort_id: uuid.UUID,
+    order_id: uuid.UUID,
+    work_item_id: str | None = None,
+    timeout_s: float = 35.0,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        body = _snapshot(cohort_id=cohort_id, order_id=order_id)
+        parked_row = next(
+            (
+                row
+                for row in body["parked_list"]
+                if row["order_id"] == str(order_id)
+                and row["work_type"] == "dispatch"
+                and (work_item_id is None or row["id"] == work_item_id)
+            ),
+            None,
+        )
+        if parked_row is not None:
+            return parked_row
+        time.sleep(POLL_S)
+    pytest.fail(f"dispatch for {order_id} did not park within {timeout_s}s")
+
+
+def test_scenario_3_kill_resume_then_park_clear_redrive() -> None:
     crash_cohort = uuid.uuid4()
     park_cohort = uuid.uuid4()
     killed = False
@@ -184,32 +205,35 @@ def test_scenario_3_kill_resume_then_park_clear_redrive(
         post_sim_faults(RSIM_URL, {"mode": "clear", "mix": "off"})
 
         # Do not restart yet: the survivor must reclaim after the <=15s lease gap.
+        # Prove the gap + same-key resume from the public snapshot, not Postgres.
         resumed = False
         deadline = time.monotonic() + LEASE_RESUME_TIMEOUT_S
         while time.monotonic() < deadline:
-            with session_factory() as session:
-                attempts = session.scalars(
-                    select(Attempt)
-                    .where(Attempt.work_item_id == crash_item_id)
-                    .order_by(Attempt.started_at)
-                ).all()
-                abandoned = [
-                    row
-                    for row in attempts
-                    if row.lease_owner == crash_owner
-                    and row.outcome is None
-                    and row.ended_at is None
-                ]
-                survivor = [
-                    row
-                    for row in attempts
-                    if row.lease_owner != crash_owner
-                    and row.outcome is not None
-                    and row.ended_at is not None
-                ]
-                if abandoned and survivor:
-                    resumed = True
-                    break
+            body = _snapshot(cohort_id=crash_cohort, order_id=crash_order_id)
+            trace = body.get("trace")
+            attempts = trace["attempts"] if isinstance(trace, dict) else []
+            confirm_attempts = [row for row in attempts if row["work_type"] == "confirm"]
+            abandoned = [
+                row
+                for row in confirm_attempts
+                if row["lease_owner"] == crash_owner
+                and row["outcome"] is None
+                and row["ended_at"] is None
+                and row["work_item_id"] == str(crash_item_id)
+                and row["idempotency_key"] == stored_confirm_key
+            ]
+            survivor = [
+                row
+                for row in confirm_attempts
+                if row["lease_owner"] != crash_owner
+                and row["outcome"] is not None
+                and row["ended_at"] is not None
+                and row["work_item_id"] == str(crash_item_id)
+                and row["idempotency_key"] == stored_confirm_key
+            ]
+            if abandoned and survivor:
+                resumed = True
+                break
             time.sleep(POLL_S)
         assert resumed, "survivor did not reclaim the abandoned lease"
 
@@ -228,8 +252,25 @@ def test_scenario_3_kill_resume_then_park_clear_redrive(
         crash_snapshot = _snapshot(cohort_id=crash_cohort, order_id=crash_order_id)
         trace = crash_snapshot["trace"]
         assert trace is not None
-        assert any(row["outcome"] is None for row in trace["attempts"])
-        assert any(row["outcome"] is not None for row in trace["attempts"])
+        confirm_attempts = [row for row in trace["attempts"] if row["work_type"] == "confirm"]
+        abandoned = [
+            row
+            for row in confirm_attempts
+            if row["lease_owner"] == crash_owner
+            and row["outcome"] is None
+            and row["work_item_id"] == str(crash_item_id)
+            and row["idempotency_key"] == stored_confirm_key
+        ]
+        survivor = [
+            row
+            for row in confirm_attempts
+            if row["lease_owner"] != crash_owner
+            and row["outcome"] is not None
+            and row["work_item_id"] == str(crash_item_id)
+            and row["idempotency_key"] == stored_confirm_key
+        ]
+        assert abandoned, confirm_attempts
+        assert survivor, confirm_attempts
         confirmed = [
             event
             for event in trace["order_events"]
@@ -239,10 +280,6 @@ def test_scenario_3_kill_resume_then_park_clear_redrive(
         assert all(event["cause"] not in LEASE_LIFECYCLE_CAUSES for event in trace["order_events"])
         assert crash_snapshot["duplicate_effects"] == 0
         assert _ledger_count(RSIM_URL, stored_confirm_key) == 1
-        with session_factory() as session:
-            crash_item = session.get(WorkItem, crash_item_id)
-            assert crash_item is not None
-            assert crash_item.idempotency_key == stored_confirm_key
 
         # Close the crash beat before introducing the separate courier-blackout
         # fixture. Otherwise that deliberate fault can park the crash order's
@@ -250,31 +287,40 @@ def test_scenario_3_kill_resume_then_park_clear_redrive(
         assert _wait_order(crash_order_id, {"delivered"}, timeout_s=ORDER_TIMEOUT_S) == "delivered"
 
         # Runbook's second beat: catch dispatch at ready, exhaust under courier
-        # blackout, inspect the parked row, clear first, then use Watch's POST path.
+        # blackout, redrive while the fault remains (same job parks again), then
+        # clear and Redrive through Watch's POST path.
         park_order_id = _place(cohort_id=park_cohort, prefix="scenario3-park")
+        dispatch_key = dispatch_idempotency_key(park_order_id)
         _wait_order(park_order_id, {"ready"}, timeout_s=ORDER_TIMEOUT_S)
         post_sim_faults(CSIM_URL, {"mode": "blackout", "seconds": 30, "mix": "off"})
 
-        parked_row: dict[str, Any] | None = None
-        deadline = time.monotonic() + 35.0
-        while time.monotonic() < deadline:
-            body = _snapshot(cohort_id=park_cohort, order_id=park_order_id)
-            parked_row = next(
-                (
-                    row
-                    for row in body["parked_list"]
-                    if row["order_id"] == str(park_order_id) and row["work_type"] == "dispatch"
-                ),
-                None,
-            )
-            if parked_row is not None:
-                break
-            time.sleep(POLL_S)
-        assert parked_row is not None
+        parked_row = _wait_parked_dispatch(cohort_id=park_cohort, order_id=park_order_id)
         assert parked_row["id"]
         assert parked_row["owner"]
         assert parked_row["reason"] == "retry_budget_exhausted"
         assert parked_row["next_action"] == "redrive"
+
+        post_sim_faults(CSIM_URL, {"mode": "blackout", "seconds": 30, "mix": "off"})
+        mid_blackout = _http(
+            "POST",
+            f"{DASHBOARD_URL}/work-items/{parked_row['id']}/redrive",
+        )
+        assert mid_blackout.status_code == 200, mid_blackout.text
+        mid_body = mid_blackout.json()
+        assert mid_body["id"] == parked_row["id"]
+        assert mid_body["status"] == "pending"
+        assert mid_body["attempt_count"] == 0
+        assert mid_body["idempotency_key"] == dispatch_key
+        assert _ledger_count(CSIM_URL, dispatch_key) == 0
+
+        reparker = _wait_parked_dispatch(
+            cohort_id=park_cohort,
+            order_id=park_order_id,
+            work_item_id=parked_row["id"],
+        )
+        assert reparker["id"] == parked_row["id"]
+        assert reparker["reason"] == "retry_budget_exhausted"
+        assert _ledger_count(CSIM_URL, dispatch_key) == 0
 
         post_sim_faults(CSIM_URL, {"mode": "clear", "mix": "off"})
         redriven = _http(
@@ -286,27 +332,22 @@ def test_scenario_3_kill_resume_then_park_clear_redrive(
         assert redrive_body["id"] == parked_row["id"]
         assert redrive_body["status"] == "pending"
         assert redrive_body["attempt_count"] == 0
-        assert redrive_body["idempotency_key"] == dispatch_idempotency_key(park_order_id)
+        assert redrive_body["idempotency_key"] == dispatch_key
 
         assert _wait_order(park_order_id, {"delivered"}, timeout_s=ORDER_TIMEOUT_S) == "delivered"
-        assert _ledger_count(CSIM_URL, dispatch_idempotency_key(park_order_id)) == 1
+        assert _ledger_count(CSIM_URL, dispatch_key) == 1
         delivered = _snapshot(cohort_id=park_cohort, order_id=park_order_id)
         assert delivered["duplicate_effects"] == 0
         assert delivered["conservation"]["residual"] == 0
         assert not any(row["order_id"] == str(park_order_id) for row in delivered["parked_list"])
-
-        # The crash order finished before this separate park beat: crash was a
-        # gap, never loss, and courier blackout cannot contaminate that proof.
-        with session_factory() as session:
-            events = session.scalars(
-                select(OrderEvent).where(OrderEvent.order_id == crash_order_id)
-            ).all()
-            applied_confirms = [
-                event for event in events if event.to_state == "confirmed" and event.applied
-            ]
-            assert len(applied_confirms) == 1
+        finished_crash = _snapshot(cohort_id=crash_cohort, order_id=crash_order_id)
+        finished_confirms = [
+            event
+            for event in finished_crash["trace"]["order_events"]
+            if event["to_state"] == "confirmed" and event["applied"]
+        ]
+        assert len(finished_confirms) == 1
     finally:
-        post_sim_faults(RSIM_URL, {"mode": "clear", "mix": "off"})
-        post_sim_faults(CSIM_URL, {"mode": "clear", "mix": "off"})
+        mix_on()
         if killed:
             _docker("up", "-d", "worker")

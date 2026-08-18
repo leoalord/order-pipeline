@@ -17,6 +17,7 @@ from order_pipeline.redrive import (
     WorkItemOrderTerminal,
     redrive_work_item,
 )
+from tests.conftest import hold_unclaimable
 
 TTL_HOURS = 48
 
@@ -102,6 +103,7 @@ def test_redrive_rejects_missing_and_nonparked_items(
         item = session.scalars(select(WorkItem).where(WorkItem.order_id == order.id)).one()
         with pytest.raises(WorkItemNotParked):
             redrive_work_item(session, item.id, now=now)
+        hold_unclaimable(session, order.id)
 
 
 @pytest.mark.parametrize("terminal_state", ["delivered", "cancelled", "failed"])

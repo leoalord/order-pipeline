@@ -80,22 +80,31 @@ def _settings(
     )
 
 
+def _seed_confirm_row(
+    session: Session,
+    *,
+    next_attempt_at: datetime | None = None,
+) -> tuple[uuid.UUID, uuid.UUID, str]:
+    order = place_order(
+        session,
+        place_key=f"worker-{uuid.uuid4()}",
+        items=["burrito"],
+        cohort_id=None,
+        ttl_hours=TTL_HOURS,
+    )
+    item = session.scalars(select(WorkItem).where(WorkItem.order_id == order.id)).one()
+    item.next_attempt_at = next_attempt_at
+    session.flush()
+    return order.id, item.id, item.idempotency_key
+
+
 def _seed_confirm(
     factory: sessionmaker[Session],
     *,
     next_attempt_at: datetime | None = None,
 ) -> tuple[uuid.UUID, uuid.UUID, str]:
     with factory.begin() as session:
-        order = place_order(
-            session,
-            place_key=f"worker-{uuid.uuid4()}",
-            items=["burrito"],
-            cohort_id=None,
-            ttl_hours=TTL_HOURS,
-        )
-        item = session.scalars(select(WorkItem).where(WorkItem.order_id == order.id)).one()
-        item.next_attempt_at = next_attempt_at
-        return order.id, item.id, item.idempotency_key
+        return _seed_confirm_row(session, next_attempt_at=next_attempt_at)
 
 
 def _claim(
@@ -363,6 +372,90 @@ def test_cancelled_zero_rows_is_supersession_not_invalid(
         ).all()
         assert len(evidence) == 1
         assert evidence[0].cause == CAUSE_SUPERSEDED
+
+
+def test_cancel_then_leased_retry_keeps_work_cancelled(
+    session_factory: sessionmaker[Session],
+) -> None:
+    now = datetime.now(UTC)
+    with session_factory.begin() as session:
+        order_id, item_id, _ = _seed_confirm_row(session)
+        claimed = _claim(session, item_id, now=now, worker_id="worker-a")
+        assert claimed is not None
+
+    with session_factory.begin() as session:
+        cancelled = cancel_order(session, order_id, now=now)
+        assert cancelled.outcome is CancelOutcome.APPLIED
+
+    with session_factory.begin() as session:
+        finalize_claim(
+            session,
+            claimed,
+            HandlerResult(outcome="http_5xx"),
+            settings=_settings(),
+            counters=WorkerCounters(),
+            now=now,
+            rng=random.Random(0),
+        )
+
+    with session_factory() as session:
+        order = session.get(Order, order_id)
+        item = session.get(WorkItem, item_id)
+        assert order is not None
+        assert item is not None
+        assert order.state == "cancelled"
+        assert item.status == "cancelled"
+        assert item.lease_owner is None
+        assert item.lease_until is None
+        later = claim_next(
+            session,
+            now=now + timedelta(seconds=1),
+            lease_s=15.0,
+            worker_id="worker-b",
+            work_types=("confirm",),
+            work_item_id=item_id,
+        )
+        assert later is None
+
+
+def test_cancel_then_leased_park_keeps_work_cancelled(
+    session_factory: sessionmaker[Session],
+) -> None:
+    now = datetime.now(UTC)
+    with session_factory.begin() as session:
+        order_id, item_id, _ = _seed_confirm_row(session)
+        claimed = _claim(session, item_id, now=now, worker_id="worker-a")
+        assert claimed is not None
+
+    with session_factory.begin() as session:
+        cancelled = cancel_order(session, order_id, now=now)
+        assert cancelled.outcome is CancelOutcome.APPLIED
+
+    with session_factory.begin() as session:
+        finalize_claim(
+            session,
+            claimed,
+            HandlerResult(
+                outcome="ok",
+                disposition=WorkDisposition.PARK,
+                park_reason="retry_budget_exhausted",
+                park_next_action="redrive",
+            ),
+            settings=_settings(),
+            counters=WorkerCounters(),
+            now=now,
+            rng=random.Random(0),
+        )
+
+    with session_factory() as session:
+        order = session.get(Order, order_id)
+        item = session.get(WorkItem, item_id)
+        assert order is not None
+        assert item is not None
+        assert order.state == "cancelled"
+        assert item.status == "cancelled"
+        assert item.lease_owner is None
+        assert item.park_reason is None
 
 
 def test_stale_finalize_after_reclaim_leaves_null_attempt(

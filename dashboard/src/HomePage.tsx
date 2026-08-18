@@ -93,7 +93,9 @@ export function HomePage() {
     setRedriveStatus(null);
     try {
       const result = await redriveWorkItem(workItemId);
-      setRedriveStatus(`Redrove ${result.work_type} for order ${result.order_id}.`);
+      setRedriveStatus(
+        `Redrove ${result.work_type} for order ${result.order_id} with key ${result.idempotency_key}.`,
+      );
       setRefreshEpoch((value) => value + 1);
     } catch (err) {
       setRedriveStatus(err instanceof Error ? err.message : "Redrive failed");
@@ -520,7 +522,7 @@ export function HomePage() {
                         <button
                           className="redrive-button"
                           type="button"
-                          disabled={redriving !== null}
+                          disabled={redriving === row.id}
                           onClick={() => void redrive(row.id)}
                         >
                           {redriving === row.id ? "Redriving…" : "Redrive"}
@@ -566,7 +568,8 @@ export function HomePage() {
               <ol>
                 {trace.attempts.map((attempt) => (
                   <li key={attempt.id}>
-                    {attempt.work_type} {attempt.outcome ?? "NULL"} {attempt.started_at}
+                    {attempt.work_type} {attempt.outcome ?? "NULL"} · {attempt.lease_owner} ·{" "}
+                    {attempt.idempotency_key} · {attempt.work_item_id} {attempt.started_at}
                     {attempt.ended_at ? ` → ${attempt.ended_at}` : ""}
                   </li>
                 ))}

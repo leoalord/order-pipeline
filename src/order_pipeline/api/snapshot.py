@@ -553,6 +553,7 @@ def _trace(
                 ended_at=attempt.ended_at,
                 lease_owner=attempt.lease_owner,
                 outcome=attempt.outcome,
+                idempotency_key=work_by_id[attempt.work_item_id].idempotency_key,
             )
             for attempt in order_attempts
         ],

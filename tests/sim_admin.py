@@ -35,3 +35,26 @@ def mix_off(*base_urls: str) -> None:
         assert body["flaky_5xx_pct"] == 0.0, body
         assert body["flaky_drop_pct"] == 0.0, body
         assert body["blackout_remaining_s"] == 0, body
+
+
+def mix_on(*base_urls: str) -> None:
+    targets = base_urls or (RSIM_URL, CSIM_URL)
+    for url in targets:
+        body = post_sim_faults(url, {"mode": "clear", "mix": "on"})
+        assert body["mix"] == "on", body
+        assert body["flaky_5xx_pct"] == 3.0, body
+        assert body["flaky_drop_pct"] == 2.0, body
+        assert body["blackout_remaining_s"] == 0, body
+
+
+def restore_demo_mix() -> None:
+    """Best-effort: leave the live sims at the pre-demo 3%/2% mix."""
+    for url in (RSIM_URL, CSIM_URL):
+        try:
+            httpx.post(
+                f"{url}/admin/faults",
+                json={"mode": "clear", "mix": "on"},
+                timeout=5.0,
+            )
+        except httpx.RequestError:
+            continue
