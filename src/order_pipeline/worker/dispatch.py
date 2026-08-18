@@ -45,6 +45,28 @@ def parse_ready_at(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _optional_time(raw: object) -> datetime | None:
+    if not isinstance(raw, str) or not raw:
+        return None
+    return parse_ready_at(raw)
+
+
+def _next_ride_poll_at(
+    *,
+    now: datetime,
+    estimated_ready_at: datetime | None,
+    service_started_at: datetime | None,
+    status: object,
+    poll_interval_s: float,
+) -> datetime:
+    """Wait for pickup when assigned, then wait for the delivery ETA."""
+    if status == "assigned" and service_started_at is not None and service_started_at > now:
+        return service_started_at
+    if status == "en_route" and estimated_ready_at is not None and estimated_ready_at > now:
+        return estimated_ready_at
+    return now + timedelta(seconds=poll_interval_s)
+
+
 def _payload_dict(claimed: ClaimedWork) -> dict[str, Any]:
     raw = claimed.payload
     return raw if isinstance(raw, dict) else {}
@@ -85,6 +107,7 @@ class CourierHandlers:
         ticket_id = body["ticket_id"]
         raw_eta = body["estimated_ready_at"]
         eta = parse_ready_at(raw_eta)
+        status = body.get("status")
         ticket: dict[str, Any] = {
             "ticket_id": ticket_id,
             "estimated_ready_at": raw_eta,
@@ -94,19 +117,30 @@ class CourierHandlers:
             raw = body.get(name)
             if isinstance(raw, str) and raw:
                 ticket[name] = raw
+        pickup_at = _optional_time(ticket.get("service_started_at"))
         return HandlerResult(
             outcome="ok",
-            transition=GuardedTransition(
-                expected_state="ready",
-                to_state="out_for_delivery",
-                cause=CAUSE_DISPATCH,
+            transition=(
+                GuardedTransition(
+                    expected_state="ready",
+                    to_state="out_for_delivery",
+                    cause=CAUSE_DISPATCH,
+                )
+                if status in {"en_route", "delivered"}
+                else None
             ),
             next_work=(
                 NextWork(
                     work_type=POLL_RIDE_WORK_TYPE,
                     idempotency_key=poll_ride_idempotency_key(claimed.order_id),
                     payload=ticket,
-                    next_attempt_at=eta,
+                    next_attempt_at=_next_ride_poll_at(
+                        now=self._now(),
+                        estimated_ready_at=eta,
+                        service_started_at=pickup_at,
+                        status=status,
+                        poll_interval_s=self.settings.poll_interval_s,
+                    ),
                 ),
             ),
             result_payload=ticket,
@@ -124,7 +158,31 @@ class CourierHandlers:
             return HandlerResult(outcome=outcome)
 
         status = response.json().get("status")
-        # assigned / en_route stay out_for_delivery — there is no extra lifecycle stage.
+        eta = _optional_time(payload.get("estimated_ready_at"))
+        pickup_at = _optional_time(payload.get("service_started_at"))
+        next_poll_at = _next_ride_poll_at(
+            now=self._now(),
+            estimated_ready_at=eta,
+            service_started_at=pickup_at,
+            status=status,
+            poll_interval_s=self.settings.poll_interval_s,
+        )
+
+        # Assignment reserves future courier capacity but is not a pickup. Keep
+        # the order Ready until the courier reports that the trip actually began.
+        if claimed.order_state == "ready" and status in {"en_route", "delivered"}:
+            return HandlerResult(
+                outcome="ok",
+                disposition=WorkDisposition.RETRY,
+                transition=GuardedTransition(
+                    expected_state="ready",
+                    to_state="out_for_delivery",
+                    cause=CAUSE_DISPATCH,
+                ),
+                next_attempt_at=next_poll_at,
+                result_payload=payload,
+            )
+
         if claimed.order_state == "out_for_delivery" and status == "delivered":
             return HandlerResult(
                 outcome="ok",
@@ -133,6 +191,13 @@ class CourierHandlers:
                     to_state="delivered",
                     cause=CAUSE_DELIVERED,
                 ),
+                result_payload=payload,
+            )
+        if status in {"assigned", "en_route"}:
+            return HandlerResult(
+                outcome="ok",
+                disposition=WorkDisposition.RETRY,
+                next_attempt_at=next_poll_at,
                 result_payload=payload,
             )
         return self._poll_again()

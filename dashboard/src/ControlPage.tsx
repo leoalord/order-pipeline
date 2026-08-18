@@ -1,9 +1,42 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { Navigate } from "react-router-dom";
+
+import {
+  redriveWorkItem,
+  type LoadgenStatus,
+  type ParkedRow,
+} from "./snapshot";
+
+export type ScenarioId =
+  | "ready"
+  | "normal"
+  | "rush"
+  | "outage"
+  | "worker_crash"
+  | "courier_failure";
 
 type LastPost = {
   path: string;
   status: number;
   body: string;
+};
+
+type PresenterRailProps = {
+  activeScenario: ScenarioId;
+  courierFaultActive: boolean;
+  loadgen: LoadgenStatus | null;
+  parkedCourierJobs: ParkedRow[];
+  readyOrders: number;
+  onClose: () => void;
+  onMutation: () => void;
+  onScenarioChange: (scenario: ScenarioId) => void;
+};
+
+type CourierCapacity = {
+  fleet_size: number;
+  boot_fleet_size: number;
+  min_fleet_size: number;
+  max_fleet_size: number;
 };
 
 async function post(
@@ -20,20 +53,85 @@ async function post(
   return { path, status: response.status, body: text };
 }
 
-export function ControlPage() {
+export function scenarioLabel(scenario: ScenarioId): string {
+  return {
+    ready: "Ready",
+    normal: "Normal",
+    rush: "Rush",
+    outage: "Outage",
+    worker_crash: "Worker crash",
+    courier_failure: "Courier failure",
+  }[scenario];
+}
+
+export function PresenterRail({
+  activeScenario,
+  courierFaultActive,
+  loadgen,
+  parkedCourierJobs,
+  readyOrders,
+  onClose,
+  onMutation,
+  onScenarioChange,
+}: PresenterRailProps) {
   const [mult, setMult] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [last, setLast] = useState<LastPost | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [capacity, setCapacity] = useState<CourierCapacity | null>(null);
+  const [capacityDraft, setCapacityDraft] = useState(8);
 
-  const run = async (path: string, body?: Record<string, string | number>) => {
+  useEffect(() => {
+    const controller = new AbortController();
+    const loadCapacity = async () => {
+      try {
+        const response = await fetch("/csim/admin/capacity", {
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new Error(`GET /csim/admin/capacity ${response.status}`);
+        }
+        const body = (await response.json()) as CourierCapacity;
+        setCapacity(body);
+        setCapacityDraft(body.fleet_size);
+      } catch (err) {
+        if (!controller.signal.aborted) {
+          setError(
+            err instanceof Error ? err.message : "Courier capacity unavailable",
+          );
+        }
+      }
+    };
+    void loadCapacity();
+    return () => controller.abort();
+  }, []);
+
+  const run = async (
+    path: string,
+    body?: Record<string, string | number>,
+    scenario?: ScenarioId,
+  ) => {
     setBusy(path);
     setError(null);
+    setNotice(null);
     try {
       const result = await post(path, body);
       setLast(result);
+      if (result.status < 200 || result.status >= 300) {
+        throw new Error(
+          `${path} returned ${result.status}: ${result.body.slice(0, 160)}`,
+        );
+      }
+      if (scenario) {
+        onScenarioChange(scenario);
+      }
+      onMutation();
+      if (scenario) {
+        onClose();
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "loadgen POST failed");
+      setError(err instanceof Error ? err.message : "Scenario action failed");
     } finally {
       setBusy(null);
     }
@@ -42,170 +140,443 @@ export function ControlPage() {
   const rush = () => {
     const trimmed = mult.trim();
     if (trimmed === "") {
-      void run("/loadgen/scenario/rush");
+      void run("/loadgen/scenario/rush", undefined, "rush");
       return;
     }
     const value = Number(trimmed);
     if (!Number.isFinite(value) || value <= 0) {
-      setError("mult must be a number > 0");
+      setError("Rush multiplier must be a number greater than 0.");
       return;
     }
-    void run("/loadgen/scenario/rush", { mult: value });
+    void run("/loadgen/scenario/rush", { mult: value }, "rush");
   };
 
-  return (
-    <main className="page">
-      <h1>Control</h1>
-      <p className="lede">
-        Click a beat, then watch the other tab. This page does not share React
-        state with Watch — each polls on its own. Curls to :8090 are the same
-        endpoints.
-      </p>
-      {error ? <p className="error">{error}</p> : null}
+  const applyCourierCapacity = async () => {
+    const path = "/csim/admin/capacity";
+    setBusy(path);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await post(path, { fleet_size: capacityDraft });
+      setLast(result);
+      if (result.status < 200 || result.status >= 300) {
+        throw new Error(
+          `${path} returned ${result.status}: ${result.body.slice(0, 160)}`,
+        );
+      }
+      const body = JSON.parse(result.body) as CourierCapacity;
+      setCapacity(body);
+      setCapacityDraft(body.fleet_size);
+      onMutation();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Capacity change failed");
+    } finally {
+      setBusy(null);
+    }
+  };
 
-      <section className="pane">
-        <h2>Pre-demo</h2>
-        <p className="pane-intro">
-          Calibrate H on this machine (mix stays on). New cohort resets
-          snapshot counts; H is kept.
+  const redriveAllCourierJobs = async () => {
+    const jobs = [...parkedCourierJobs];
+    setBusy("redrive-courier");
+    setError(null);
+    setNotice(null);
+    let succeeded = 0;
+    let failed = 0;
+    try {
+      for (let start = 0; start < jobs.length; start += 8) {
+        const outcomes = await Promise.allSettled(
+          jobs.slice(start, start + 8).map((job) => redriveWorkItem(job.id)),
+        );
+        for (const outcome of outcomes) {
+          if (outcome.status === "fulfilled") {
+            succeeded += 1;
+          } else {
+            failed += 1;
+          }
+        }
+      }
+      if (succeeded === 0 && failed > 0) {
+        setError(`No courier jobs were redriven; ${failed} failed.`);
+      } else {
+        setNotice(
+          failed > 0
+            ? `Redrove ${succeeded} courier jobs; ${failed} could not be redriven.`
+            : `Redrove ${succeeded} parked courier jobs.`,
+        );
+      }
+      onMutation();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const reset = async () => {
+    const steps: Array<
+      [string, Record<string, string | number> | undefined]
+    > = [
+      ["/loadgen/stop", undefined],
+      ["/rsim/admin/faults", { mode: "clear" }],
+      ["/csim/admin/faults", { mode: "clear" }],
+      [
+        "/csim/admin/capacity",
+        { fleet_size: capacity?.boot_fleet_size ?? 8 },
+      ],
+      ["/rsim/admin/stock", { item: "burrito", count: 200 }],
+      ["/loadgen/cohort/new", undefined],
+    ];
+    setBusy("reset");
+    setError(null);
+    setNotice(null);
+    try {
+      for (const [path, body] of steps) {
+        const result = await post(path, body);
+        setLast(result);
+        if (result.status < 200 || result.status >= 300) {
+          throw new Error(
+            `${path} returned ${result.status}: ${result.body.slice(0, 160)}`,
+          );
+        }
+      }
+      onScenarioChange("ready");
+      onMutation();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Reset failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const disabled = busy !== null;
+  const calibrated = (loadgen?.h ?? 0) > 0;
+
+  return (
+    <aside
+      className="side-panel presenter-rail"
+      id="presenter-rail"
+      aria-label="Presenter controls"
+    >
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Demo sequence</p>
+          <h2>Presenter controls</h2>
+        </div>
+        <button
+          className="hide-controls-button"
+          type="button"
+          onClick={onClose}
+          aria-label="Hide presenter controls"
+        >
+          <span aria-hidden="true">‹</span>
+          Hide controls
+        </button>
+      </div>
+
+      <p className="panel-summary">
+        Active: <strong>{scenarioLabel(activeScenario)}</strong>. Actions use
+        the existing scenario endpoints.
+      </p>
+
+      <section
+        className={`calibration-card ${calibrated ? "ready" : "required"}`}
+        aria-label="Capacity calibration"
+      >
+        <div>
+          <span>Capacity baseline</span>
+          <strong>
+            {calibrated
+              ? `Ready · H ${(loadgen?.h ?? 0).toFixed(2)} orders / sec`
+              : "Required before Normal or Rush"}
+          </strong>
+          <small>
+            {calibrated
+              ? "Recalibrate after changing the worker or dependency topology."
+              : "Run once after the load generator starts or restarts."}
+          </small>
+        </div>
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => void run("/loadgen/calibrate")}
+        >
+          {busy === "/loadgen/calibrate"
+            ? "Calibrating…"
+            : calibrated
+              ? "Recalibrate"
+              : "Calibrate first"}
+        </button>
+      </section>
+
+      <section className="capacity-card" aria-label="Courier capacity">
+        <div className="capacity-heading">
+          <div>
+            <span>Courier capacity</span>
+            <strong>Fleet capacity · {capacityDraft} couriers</strong>
+          </div>
+          <output aria-live="polite">
+            {capacity ? `Live ${capacity.fleet_size}` : "Connecting…"}
+          </output>
+        </div>
+        <label htmlFor="courier-capacity">
+          <span>Fewer</span>
+          <input
+            id="courier-capacity"
+            type="range"
+            min={4}
+            max={32}
+            step={1}
+            value={capacityDraft}
+            aria-label="Courier fleet capacity"
+            aria-valuetext={`${capacityDraft} courier fleet capacity`}
+            disabled={disabled || capacity === null}
+            onChange={(event) => setCapacityDraft(Number(event.target.value))}
+          />
+          <span>More</span>
+        </label>
+        <div className="capacity-context">
+          <span>{readyOrders} Ready orders</span>
+          <span>{parkedCourierJobs.length} parked courier jobs</span>
+        </div>
+        <p>
+          Scaling affects new dispatches. Redrive parked courier jobs after the
+          Delivery service recovers.
         </p>
-        <div className="control-row">
+        <div className="capacity-actions">
           <button
             type="button"
-            disabled={busy !== null}
-            onClick={() => void run("/loadgen/calibrate")}
+            disabled={
+              disabled || capacity === null || capacityDraft === capacity.fleet_size
+            }
+            onClick={() => void applyCourierCapacity()}
           >
-            Calibrate
+            {busy === "/csim/admin/capacity"
+              ? "Applying…"
+              : `Apply ${capacityDraft} couriers`}
           </button>
           <button
+            className="redrive-all-button"
             type="button"
-            disabled={busy !== null}
+            disabled={
+              disabled || courierFaultActive || parkedCourierJobs.length === 0
+            }
+            onClick={() => void redriveAllCourierJobs()}
+          >
+            {busy === "redrive-courier"
+              ? "Redriving courier jobs…"
+              : `Redrive ${parkedCourierJobs.length} parked courier jobs`}
+          </button>
+        </div>
+        {courierFaultActive ? (
+          <small className="capacity-warning">
+            Recover the courier service before redriving parked jobs.
+          </small>
+        ) : null}
+      </section>
+
+      <div className="scenario-list">
+        <section
+          className={
+            activeScenario === "normal"
+              ? "scenario-card active"
+              : "scenario-card"
+          }
+        >
+          <span className="scenario-number">01</span>
+          <div>
+            <h3>Normal</h3>
+            <p>Steady arrivals; follow a ticket through every lifecycle stage.</p>
+            <button
+              type="button"
+              disabled={disabled || !calibrated}
+              onClick={() =>
+                void run("/loadgen/scenario/steady", undefined, "normal")
+              }
+            >
+              Start normal
+            </button>
+          </div>
+        </section>
+
+        <section
+          className={
+            activeScenario === "rush"
+              ? "scenario-card active warning"
+              : "scenario-card warning"
+          }
+        >
+          <span className="scenario-number">02</span>
+          <div>
+            <h3>Rush</h3>
+            <p>Pressure rises, promises stretch, then the same pipeline drains.</p>
+            <label className="mult">
+              Multiplier
+              <input
+                value={mult}
+                onChange={(event) => setMult(event.target.value)}
+                placeholder="1.0"
+                inputMode="decimal"
+                disabled={disabled}
+              />
+            </label>
+            <button
+              type="button"
+              disabled={disabled || !calibrated}
+              onClick={rush}
+            >
+              Start rush
+            </button>
+          </div>
+        </section>
+
+        <section
+          className={
+            activeScenario === "outage"
+              ? "scenario-card active danger"
+              : "scenario-card danger"
+          }
+        >
+          <span className="scenario-number">03</span>
+          <div>
+            <h3>Outage</h3>
+            <p>
+              Tag doomed confirms, then black out the Restaurant lane for 60s.
+            </p>
+            <div className="button-pair">
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() =>
+                  void run("/loadgen/beat/doom-confirm", undefined, "outage")
+                }
+              >
+                1 · Doom confirms
+              </button>
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() =>
+                  void run(
+                    "/rsim/admin/faults",
+                    { mode: "blackout", seconds: 60 },
+                    "outage",
+                  )
+                }
+              >
+                2 · Blackout
+              </button>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={disabled}
+                onClick={() =>
+                  void run("/rsim/admin/faults", { mode: "clear" })
+                }
+              >
+                Recover restaurant
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section
+          className={
+            activeScenario === "worker_crash"
+              ? "scenario-card active danger"
+              : "scenario-card danger"
+          }
+        >
+          <span className="scenario-number">04</span>
+          <div>
+            <h3>Worker crash</h3>
+            <p>
+              Arm a readable lease, then stop the matching owner from the Docker
+              terminal.
+            </p>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() =>
+                void run(
+                  "/rsim/admin/faults",
+                  { mode: "blackout", seconds: 60 },
+                  "worker_crash",
+                )
+              }
+            >
+              Arm visible lease
+            </button>
+          </div>
+        </section>
+
+        <section
+          className={
+            activeScenario === "courier_failure"
+              ? "scenario-card active danger"
+              : "scenario-card danger"
+          }
+        >
+          <span className="scenario-number">05</span>
+          <div>
+            <h3>Courier failure</h3>
+            <p>
+              Exhaust dispatch, park the same work item, recover, then Redrive.
+            </p>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() =>
+                void run(
+                  "/csim/admin/faults",
+                  { mode: "blackout", seconds: 30 },
+                  "courier_failure",
+                )
+              }
+            >
+              Blackout courier · 30s
+            </button>
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={disabled}
+              onClick={() =>
+                void run("/csim/admin/faults", { mode: "clear" })
+              }
+            >
+              Recover courier
+            </button>
+          </div>
+        </section>
+      </div>
+
+      <details className="rail-setup">
+        <summary>Setup & bonus beats</summary>
+        <div className="button-pair">
+          <button
+            type="button"
+            disabled={disabled}
             onClick={() => void run("/loadgen/cohort/new")}
           >
             New cohort
           </button>
-        </div>
-      </section>
-
-      <section className="pane">
-        <h2>Load</h2>
-        <p className="pane-intro">
-          Steady is 0.4×H. Rush is 60s at 1.5×H×mult, then drain back to
-          0.4×H — it does not replay a baseline minute. Stop ends arrivals.
-        </p>
-        <div className="control-row">
           <button
             type="button"
-            disabled={busy !== null}
-            onClick={() => void run("/loadgen/scenario/steady")}
-          >
-            Steady
-          </button>
-          <label className="mult">
-            mult
-            <input
-              value={mult}
-              onChange={(event) => setMult(event.target.value)}
-              placeholder="optional"
-              inputMode="decimal"
-              spellCheck={false}
-              autoComplete="off"
-              disabled={busy !== null}
-            />
-          </label>
-          <button type="button" disabled={busy !== null} onClick={rush}>
-            Rush
-          </button>
-          <button
-            type="button"
-            disabled={busy !== null}
-            onClick={() => void run("/loadgen/stop")}
-          >
-            Stop
-          </button>
-        </div>
-      </section>
-
-      <section className="pane">
-        <h2>Outage</h2>
-        <p className="pane-intro">
-          Doom-confirm tags three confirms until their individual 120s clocks.
-          Restaurant blackout is the separate 60s recovery beat; arrivals stay
-          at 0.4×H. Clear removes both restaurant fault sets.
-        </p>
-        <div className="control-row">
-          <button
-            type="button"
-            disabled={busy !== null}
-            onClick={() => void run("/loadgen/beat/doom-confirm")}
-          >
-            Doom-confirm
-          </button>
-          <button
-            type="button"
-            disabled={busy !== null}
-            onClick={() =>
-              void run("/rsim/admin/faults", { mode: "blackout", seconds: 60 })
-            }
-          >
-            Restaurant blackout (60s)
-          </button>
-          <button
-            type="button"
-            disabled={busy !== null}
-            onClick={() => void run("/rsim/admin/faults", { mode: "clear" })}
-          >
-            Clear restaurant
-          </button>
-        </div>
-      </section>
-
-      <section className="pane">
-        <h2>Crash assist</h2>
-        <p className="pane-intro">
-          Courier blackout is the 30s park fixture. Stop a worker only from the
-          Docker terminal while Watch reports an in-flight lease.
-        </p>
-        <div className="control-row">
-          <button
-            type="button"
-            disabled={busy !== null}
-            onClick={() =>
-              void run("/csim/admin/faults", { mode: "blackout", seconds: 30 })
-            }
-          >
-            Courier blackout (30s)
-          </button>
-        </div>
-      </section>
-
-      <section className="pane">
-        <h2>Bonuses</h2>
-        <p className="pane-intro">
-          Cancel race places then cancels to collide with confirm. Fail void is
-          sticky restaurant 500s on void — Abort with Clear restaurant (
-          <code>clear</code>). Out of stock zeros burrito; Place one burrito
-          order; Abort leftover 0 with Restore stock (
-          <code>count: 200</code>).
-        </p>
-        <div className="control-row">
-          <button
-            type="button"
-            disabled={busy !== null}
+            disabled={disabled}
             onClick={() => void run("/loadgen/beat/cancel-race")}
           >
             Cancel race
           </button>
           <button
             type="button"
-            disabled={busy !== null}
-            onClick={() => void run("/rsim/admin/faults", { mode: "fail_void" })}
+            disabled={disabled}
+            onClick={() =>
+              void run("/rsim/admin/faults", { mode: "fail_void" })
+            }
           >
             Fail void
           </button>
           <button
             type="button"
-            disabled={busy !== null}
+            disabled={disabled}
             onClick={() =>
               void run("/rsim/admin/stock", { item: "burrito", count: 0 })
             }
@@ -214,32 +585,53 @@ export function ControlPage() {
           </button>
           <button
             type="button"
-            disabled={busy !== null}
+            disabled={disabled}
             onClick={() =>
               void run("/loadgen/beat/place", { item: "burrito" })
             }
           >
-            Place
+            Place burrito
           </button>
           <button
             type="button"
-            disabled={busy !== null}
+            disabled={disabled}
             onClick={() =>
-              void run("/rsim/admin/stock", { item: "burrito", count: 200 })
+              void run("/rsim/admin/stock", {
+                item: "burrito",
+                count: 200,
+              })
             }
           >
             Restore stock
           </button>
         </div>
-      </section>
+      </details>
 
-      <p className="hint last-post">
-        {busy ? `posting ${busy}…` : null}
-        {!busy && last
-          ? `${last.path} → ${last.status} ${last.body.slice(0, 400)}`
-          : null}
-        {!busy && !last ? "Last POST status shows here." : null}
-      </p>
-    </main>
+      <div className="rail-footer">
+        <button
+          className="reset-button"
+          type="button"
+          disabled={disabled}
+          onClick={() => void reset()}
+        >
+          Reset demo
+        </button>
+        <p
+          className={error ? "action-status error" : "action-status"}
+          role="status"
+        >
+          {busy
+            ? `Running ${busy}…`
+            : (error ??
+              notice ??
+              (last ? `${last.path} → ${last.status}` : "Ready for the next beat."))}
+        </p>
+      </div>
+    </aside>
   );
+}
+
+/** Old bookmarks land on the unified presentation surface. */
+export function ControlPage() {
+  return <Navigate to="/" replace />;
 }

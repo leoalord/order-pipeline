@@ -1,33 +1,338 @@
-import { useEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 
 import {
+  PresenterRail,
+  scenarioLabel,
+  type ScenarioId,
+} from "./ControlPage";
+import {
   fetchLoadgenStatus,
+  fetchSimFaults,
   fetchSnapshot,
   POLL_MS,
   redriveWorkItem,
   STAGE_LABELS,
   STAGE_SEAMS,
+  type LoadgenStatus,
+  type OrderSummary,
+  type SimHttpLane,
+  type SimFaultStatus,
+  type SimFaults,
   type Snapshot,
+  type StageLabel,
 } from "./snapshot";
 
-const ORDER_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+type DetailPanel =
+  | { kind: "order"; orderId: string }
+  | { kind: "zone"; zone: "restaurant" | "delivery" }
+  | { kind: "correctness" }
+  | { kind: "system"; system: "worker" };
 
-function fmt(value: number | null | undefined): string {
+type HealthTone = "healthy" | "pressure" | "fault";
+
+function simFaultActive(status: SimFaultStatus | undefined): boolean {
+  return Boolean(
+    status &&
+      (status.mode !== "off" ||
+        status.blackout_remaining_s > 0 ||
+        status.confirm_unavailable.length > 0),
+  );
+}
+
+function simFaultLabel(status: SimFaultStatus | undefined, normal: string): string {
+  if (!status) return normal;
+  if (status.blackout_remaining_s > 0) {
+    return `⚠ Blackout · ${Math.ceil(status.blackout_remaining_s)}s`;
+  }
+  const targeted = status.confirm_unavailable.length;
+  if (targeted > 0) {
+    return `⚠ ${targeted} targeted confirm${targeted === 1 ? "" : "s"}`;
+  }
+  return status.mode === "off" ? normal : "⚠ Fault active";
+}
+
+const ORDER_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const API_STATE_BY_STAGE: Record<StageLabel, string> = {
+  placed: "placed",
+  confirmed: "confirmed",
+  "being prepared": "being_prepared",
+  ready: "ready",
+  "out for delivery": "out_for_delivery",
+  delivered: "delivered",
+};
+
+const STAGE_DESCRIPTIONS: Record<StageLabel, string> = {
+  placed: "Order received",
+  confirmed: "Restaurant accepted",
+  "being prepared": "Preparation underway",
+  ready: "Ready for pickup",
+  "out for delivery": "Courier en route",
+  delivered: "Completed",
+};
+
+const SCENARIO_COPY: Record<
+  ScenarioId,
+  { title: string; body: string; tone: "neutral" | "success" | "warning" | "danger" }
+> = {
+  ready: {
+    title: "System ready",
+    body: "Open Presenter controls to start the walkthrough.",
+    tone: "neutral",
+  },
+  normal: {
+    title: "Normal flow",
+    body: "Follow the focused ticket across the handoff. Counts reconcile as work completes.",
+    tone: "success",
+  },
+  rush: {
+    title: "Rush pressure",
+    body: "Watch stage stacks, busy responses, and the oldest order rise before the drain.",
+    tone: "warning",
+  },
+  outage: {
+    title: "Restaurant outage",
+    body: "Targeted confirmations retry with the same keys while ordinary orders keep flowing.",
+    tone: "danger",
+  },
+  worker_crash: {
+    title: "Worker crash",
+    body: "A visible lease identifies the owner; a survivor resumes with the same idempotency key.",
+    tone: "danger",
+  },
+  courier_failure: {
+    title: "Courier failure",
+    body: "Dispatch parks without changing the lifecycle. Recover, then Redrive the same work item.",
+    tone: "danger",
+  },
+};
+
+function fmt(value: number | null | undefined, digits = 1): string {
   if (value === null || value === undefined) {
     return "—";
   }
-  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+  return Number.isInteger(value) ? String(value) : value.toFixed(digits);
+}
+
+function displayCode(id: string): string {
+  const hex = id.replaceAll("-", "").slice(-8);
+  const code = Number.parseInt(hex, 16).toString(36).toUpperCase();
+  return code.slice(-4).padStart(4, "0");
+}
+
+function stateLabel(state: string): string {
+  if (state === "being_prepared") return "Being prepared";
+  if (state === "out_for_delivery") return "Out for delivery";
+  return state.charAt(0).toUpperCase() + state.slice(1);
+}
+
+function ageLabel(iso: string): string {
+  const seconds = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+  if (seconds < 60) return `${Math.round(seconds)}s ago`;
+  return `${Math.round(seconds / 60)}m ago`;
+}
+
+function healthForLane(lane: SimHttpLane | undefined, used = 0, cap = 1): HealthTone {
+  if (!lane) return "pressure";
+  if (lane.timeout + lane.http_5xx > 0) return "fault";
+  if (lane.http_429 > 0 || used / Math.max(cap, 1) >= 0.75) return "pressure";
+  return "healthy";
+}
+
+function healthLabel(tone: HealthTone): string {
+  return { healthy: "Healthy", pressure: "Pressure", fault: "Fault active" }[
+    tone
+  ];
+}
+
+function TicketButton({
+  order,
+  focused,
+  onClick,
+}: {
+  order: OrderSummary;
+  focused: boolean;
+  onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={focused ? "order-ticket focused" : "order-ticket"}
+      onClick={onClick}
+      aria-label={`Order ${displayCode(order.id)}, ${stateLabel(order.state)}, ${order.items.join(", ")}`}
+      aria-pressed={focused}
+    >
+      <span className="ticket-code">{displayCode(order.id)}</span>
+      <span className="ticket-items">
+        {order.items.length} {order.items.length === 1 ? "item" : "items"}
+      </span>
+    </button>
+  );
+}
+
+function StageTickets({
+  stage,
+  count,
+  orders,
+  focusedOrderId,
+  onOrder,
+}: {
+  stage: StageLabel;
+  count: number;
+  orders: OrderSummary[];
+  focusedOrderId: string | null;
+  onOrder: (orderId: string, trigger: HTMLButtonElement) => void;
+}) {
+  const state = API_STATE_BY_STAGE[stage];
+  const inStage = orders.filter((order) => order.state === state);
+  const focused = inStage.find((order) => order.id === focusedOrderId);
+  const visible = [
+    ...(focused ? [focused] : []),
+    ...inStage.filter((order) => order.id !== focusedOrderId),
+  ].slice(0, 3);
+  const hidden = Math.max(0, count - visible.length);
+
+  return (
+    <div className="ticket-pile" aria-label={`${count} orders in ${stage}`}>
+      {visible.map((order) => (
+        <TicketButton
+          key={order.id}
+          order={order}
+          focused={order.id === focusedOrderId}
+          onClick={(event) => onOrder(order.id, event.currentTarget)}
+        />
+      ))}
+      {hidden > 0 ? (
+        <span className="ticket-stack" aria-label={`${hidden} additional orders`}>
+          <span aria-hidden="true" />
+          <strong>+{hidden}</strong>
+          <small>stacked</small>
+        </span>
+      ) : null}
+      {count === 0 ? <span className="empty-stage">Clear</span> : null}
+    </div>
+  );
+}
+
+function Metric({
+  label,
+  value,
+  detail,
+  tone,
+}: {
+  label: string;
+  value: string;
+  detail: string;
+  tone?: HealthTone | "neutral";
+}) {
+  return (
+    <div className={`evidence-metric ${tone ?? "neutral"}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{detail}</small>
+    </div>
+  );
+}
+
+function ScenarioFacts({
+  scenario,
+  snapshot,
+  simFaults,
+}: {
+  scenario: ScenarioId;
+  snapshot: Snapshot | null;
+  simFaults: SimFaults | null;
+}) {
+  const backlog = snapshot?.backlog;
+  const backlogTotal =
+    (backlog?.confirm ?? 0) +
+    (backlog?.poll_cook ?? 0) +
+    (backlog?.dispatch ?? 0) +
+    (backlog?.poll_ride ?? 0);
+  const busy = snapshot?.http_429s;
+  const busyTotal = (busy?.door ?? 0) + (busy?.kitchen ?? 0) + (busy?.courier ?? 0);
+  const restaurantErrors =
+    (snapshot?.sim_http.restaurant.timeout ?? 0) +
+    (snapshot?.sim_http.restaurant.http_5xx ?? 0);
+
+  if (scenario === "rush") {
+    return (
+      <div className="scenario-facts" aria-label="Rush evidence">
+        <span><b>{backlogTotal}</b><small>backlog</small></span>
+        <span title={`Door ${busy?.door ?? 0}, kitchen ${busy?.kitchen ?? 0}, courier ${busy?.courier ?? 0}`}><b>{busyTotal}</b><small>busy 429s</small></span>
+        <span><b>{fmt(snapshot?.stretching_etas.max_stretch_s)}s</b><small>ETA stretch</small></span>
+      </div>
+    );
+  }
+  if (scenario === "outage") {
+    return (
+      <div className="scenario-facts" aria-label="Outage evidence">
+        <span><b>{fmt(snapshot?.retry_rate, 2)}</b><small>retry rate</small></span>
+        <span><b>{restaurantErrors}</b><small>dependency errors</small></span>
+        <span><b>{simFaults?.restaurant.confirm_unavailable.length ?? 0}</b><small>targeted confirms</small></span>
+      </div>
+    );
+  }
+  if (scenario === "worker_crash") {
+    return (
+      <div className="scenario-facts" aria-label="Worker crash evidence">
+        <span><b>{fmt(snapshot?.currently_leased)}</b><small>leased</small></span>
+        <span><b>{fmt(snapshot?.duplicate_attempts)}</b><small>retry attempts</small></span>
+        <span><b>{fmt(snapshot?.duplicate_effects)}</b><small>duplicate effects</small></span>
+      </div>
+    );
+  }
+  if (scenario === "courier_failure") {
+    return (
+      <div className="scenario-facts" aria-label="Courier failure evidence">
+        <span><b>{fmt(snapshot?.parked_list.length)}</b><small>parked</small></span>
+        <span><b>{fmt(snapshot?.sim_http.courier.http_5xx)}</b><small>courier 5xx</small></span>
+        <span><b>{fmt(snapshot?.backlog.dispatch)}</b><small>dispatch backlog</small></span>
+      </div>
+    );
+  }
+  return (
+    <div className="scenario-facts" aria-label="Normal flow evidence">
+      <span><b>{fmt(snapshot?.accept_reject.accepted)}</b><small>accepted</small></span>
+      <span><b>{fmt(snapshot?.accept_reject.rejected)}</b><small>door rejects</small></span>
+      <span><b>{fmt(snapshot?.conservation.in_flight)}</b><small>in flight</small></span>
+    </div>
+  );
 }
 
 export function HomePage() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [loadgen, setLoadgen] = useState<LoadgenStatus | null>(null);
+  const [simFaults, setSimFaults] = useState<SimFaults | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [orderId, setOrderId] = useState("");
-  const [cohortId, setCohortId] = useState<string | null>(null);
+  const [focusedOrderId, setFocusedOrderId] = useState<string | null>(null);
+  const [lookupId, setLookupId] = useState("");
+  const [detailPanel, setDetailPanel] = useState<DetailPanel | null>(null);
+  const [railOpen, setRailOpen] = useState(false);
   const [redriving, setRedriving] = useState<string | null>(null);
   const [redriveStatus, setRedriveStatus] = useState<string | null>(null);
   const [refreshEpoch, setRefreshEpoch] = useState(0);
+  const [activeScenario, setActiveScenario] = useState<ScenarioId>(() => {
+    const stored = window.sessionStorage.getItem("order-pipeline-scenario");
+    return (
+      stored &&
+      ["ready", "normal", "rush", "outage", "worker_crash", "courier_failure"].includes(
+        stored,
+      )
+        ? stored
+        : "ready"
+    ) as ScenarioId;
+  });
   const cohortIdRef = useRef<string | null>(null);
+  const presenterButtonRef = useRef<HTMLButtonElement>(null);
+  const lastDetailTriggerRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -36,57 +341,158 @@ export function HomePage() {
     const poll = async () => {
       let activeCohort = cohortIdRef.current ?? undefined;
       let loadgenWarning: string | null = null;
+      let faultWarning: string | null = null;
       try {
-        // Each tab discovers the loadgen's current cohort independently. There is
-        // no cross-tab React state for New cohort to keep in sync.
         try {
-          const loadgen = await fetchLoadgenStatus(controller.signal);
-          activeCohort = loadgen.cohort_id;
+          const status = await fetchLoadgenStatus(controller.signal);
+          activeCohort = status.cohort_id;
+          setLoadgen(status);
         } catch (err) {
-          if (controller.signal.aborted) {
-            return;
-          }
+          if (controller.signal.aborted) return;
           loadgenWarning =
             err instanceof Error
               ? `${err.message}; showing the last known cohort`
               : "loadgen status unavailable; showing the last known cohort";
         }
+        try {
+          setSimFaults(await fetchSimFaults(controller.signal));
+        } catch (err) {
+          if (controller.signal.aborted) return;
+          faultWarning =
+            err instanceof Error
+              ? `${err.message}; showing the last known dependency state`
+              : "dependency state unavailable; showing the last known state";
+        }
         const body = await fetchSnapshot({
           cohortId: activeCohort,
-          orderId: ORDER_ID_RE.test(orderId.trim()) ? orderId.trim() : undefined,
+          orderId:
+            focusedOrderId && ORDER_ID_RE.test(focusedOrderId)
+              ? focusedOrderId
+              : undefined,
           signal: controller.signal,
         });
         if (!controller.signal.aborted) {
           setSnapshot(body);
           cohortIdRef.current = body.cohort_id;
-          setCohortId(body.cohort_id);
-          setError(loadgenWarning);
+          setError(
+            [loadgenWarning, faultWarning].filter(Boolean).join("; ") || null,
+          );
         }
       } catch (err) {
-        if (controller.signal.aborted) {
-          return;
+        if (!controller.signal.aborted) {
+          setError(err instanceof Error ? err.message : "snapshot poll failed");
         }
-        setError(err instanceof Error ? err.message : "snapshot poll failed");
       } finally {
         if (!controller.signal.aborted) {
-          // Schedule after completion so a slow snapshot cannot overlap the
-          // next poll and amplify pressure on the API during the demo.
-          timer = window.setTimeout(() => {
-            void poll();
-          }, POLL_MS);
+          timer = window.setTimeout(() => void poll(), POLL_MS);
         }
       }
     };
 
     void poll();
-
     return () => {
       controller.abort();
-      if (timer !== undefined) {
-        window.clearTimeout(timer);
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [focusedOrderId, refreshEpoch]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (railOpen) {
+        setRailOpen(false);
+        window.requestAnimationFrame(() => presenterButtonRef.current?.focus());
+      } else if (detailPanel) {
+        setDetailPanel(null);
+        window.requestAnimationFrame(() => lastDetailTriggerRef.current?.focus());
       }
     };
-  }, [orderId, refreshEpoch]);
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [detailPanel, railOpen]);
+
+  const orders = snapshot?.orders ?? [];
+  const automaticFocus = orders.find(
+    (order) => !["delivered", "cancelled", "failed"].includes(order.state),
+  );
+  const effectiveFocusId = focusedOrderId ?? automaticFocus?.id ?? orders[0]?.id ?? null;
+  const focusedOrder = orders.find((order) => order.id === effectiveFocusId) ?? null;
+  const trace =
+    snapshot?.trace?.order_id === focusedOrderId ? snapshot.trace : null;
+
+  const stageCounts = snapshot?.stages;
+  const conservation = snapshot?.conservation;
+  const rates = snapshot?.terminal_rates_per_min;
+  const simHttp = snapshot?.sim_http;
+  const slots = snapshot?.outbound_slots;
+  const parked = snapshot?.parked_list ?? [];
+
+  const restaurantTone = healthForLane(
+    simHttp?.restaurant,
+    slots?.restaurant.used,
+    slots?.restaurant.cap,
+  );
+  const deliveryTone = healthForLane(
+    simHttp?.courier,
+    slots?.courier.used,
+    slots?.courier.cap,
+  );
+  const workerTone: HealthTone =
+    (snapshot?.no_progress_beyond_threshold.count ?? 0) > 0
+      ? "fault"
+      : (snapshot?.retry_rate ?? 0) > 0.2
+        ? "pressure"
+        : "healthy";
+
+  const terminalOrders = useMemo(
+    () => ({
+      cancelled: orders.filter((order) => order.state === "cancelled").slice(0, 2),
+      failed: orders.filter((order) => order.state === "failed").slice(0, 2),
+    }),
+    [orders],
+  );
+
+  const setScenario = (scenario: ScenarioId) => {
+    setActiveScenario(scenario);
+    window.sessionStorage.setItem("order-pipeline-scenario", scenario);
+  };
+
+  const openRail = () => {
+    setDetailPanel(null);
+    setRailOpen(true);
+  };
+
+  const closeRail = () => {
+    setRailOpen(false);
+    window.requestAnimationFrame(() => presenterButtonRef.current?.focus());
+  };
+
+  const openDetail = (panel: DetailPanel, trigger: HTMLElement) => {
+    lastDetailTriggerRef.current = trigger;
+    setRailOpen(false);
+    setDetailPanel(panel);
+  };
+
+  const openOrder = (orderId: string, trigger: HTMLElement) => {
+    setFocusedOrderId(orderId);
+    setLookupId(orderId);
+    openDetail({ kind: "order", orderId }, trigger);
+  };
+
+  const closeDetail = () => {
+    setDetailPanel(null);
+    window.requestAnimationFrame(() => lastDetailTriggerRef.current?.focus());
+  };
+
+  const submitLookup = () => {
+    const trimmed = lookupId.trim();
+    if (!ORDER_ID_RE.test(trimmed)) {
+      setRedriveStatus("Paste a complete order UUID.");
+      return;
+    }
+    setFocusedOrderId(trimmed);
+    setDetailPanel({ kind: "order", orderId: trimmed });
+  };
 
   const redrive = async (workItemId: string) => {
     setRedriving(workItemId);
@@ -104,490 +510,738 @@ export function HomePage() {
     }
   };
 
-  const stages = snapshot?.stages;
-  const rates = snapshot?.terminal_rates_per_min;
-  const e2e = snapshot?.e2e_latency_s;
-  const conservation = snapshot?.conservation;
-  const trace = snapshot?.trace;
-  const oldest = snapshot?.oldest_open;
-  const acceptReject = snapshot?.accept_reject;
-  const backlog = snapshot?.backlog;
-  const http429s = snapshot?.http_429s;
-  const stretching = snapshot?.stretching_etas;
-  const simHttp = snapshot?.sim_http;
-  const outboundSlots = snapshot?.outbound_slots;
-  const parked = snapshot?.parked_list ?? [];
-  const leased = snapshot?.currently_leased_items ?? [];
-  const noProgress = snapshot?.no_progress_beyond_threshold;
+  const scenario = SCENARIO_COPY[activeScenario];
+  const restaurantFault = simFaultActive(simFaults?.restaurant);
+  const deliveryFault = simFaultActive(simFaults?.courier);
 
   return (
-    <main className="page">
-      <h1>Watch</h1>
-      <p className="lede">
-        Live counts for this cohort. Cards refresh on their own; nothing places
-        orders from here. Cohort: {cohortId ?? "discovering…"}
-      </p>
-      {error ? <p className="error">{error}</p> : null}
+    <main className="presentation">
+      <header className="presentation-header">
+        <div className="header-left">
+          <div className="brand-lockup">
+            <span className="brand-mark" aria-hidden="true">OP</span>
+            <div>
+              <strong>Order flow studio</strong>
+              <span>Independent systems demonstration</span>
+            </div>
+          </div>
 
-      <section className="pane">
-        <h2>Business</h2>
-        <p className="pane-intro">
-          The top row is how many orders sit in each happy-path stage{" "}
-          <em>right now</em>. Confirmed is kitchen <em>queued</em> (waiting for
-          a pan); being prepared is <em>cooking</em> (on a pan). Cancelled and
-          failed are endings, not stages — they show up in rates and
-          conservation.
+          <button
+            ref={presenterButtonRef}
+            className="presenter-button"
+            type="button"
+            onClick={openRail}
+            aria-expanded={railOpen}
+            aria-controls="presenter-rail"
+          >
+            <span aria-hidden="true">☷</span>
+            Presenter controls
+            <i aria-hidden="true">›</i>
+          </button>
+        </div>
+
+        <div className="live-context" aria-label="Live demo context">
+          <span className={`scenario-pill ${scenario.tone}`}>
+            <i aria-hidden="true" />
+            {scenarioLabel(activeScenario)}
+          </span>
+          <span className="arrival-rate">
+            <strong>{fmt(loadgen?.rate_rps, 2)}</strong> orders / sec
+          </span>
+          <span className={error ? "connection-state warning" : "connection-state"}>
+            <i aria-hidden="true" />
+            {error ? "Snapshot delayed" : "Live"}
+          </span>
+        </div>
+
+        <span className="header-balance" aria-hidden="true" />
+      </header>
+
+      <div className="presentation-body">
+        <section className={`scenario-callout ${scenario.tone}`} aria-live="polite">
+          <div>
+            <span className="eyebrow">Now showing</span>
+            <strong>{scenario.title}</strong>
+          </div>
+          <p>{scenario.body}</p>
+          <ScenarioFacts
+            scenario={activeScenario}
+            snapshot={snapshot}
+            simFaults={simFaults}
+          />
+        </section>
+
+        <section className="lifecycle-surface" aria-labelledby="lifecycle-heading">
+          <div className="surface-heading">
+            <div>
+              <p className="eyebrow">Live order lifecycle</p>
+              <h1 id="lifecycle-heading">Every order, one visible journey</h1>
+            </div>
+            <p>
+              Focused order{" "}
+              <strong>{focusedOrder ? displayCode(focusedOrder.id) : "—"}</strong>
+              {focusedOrder ? ` · ${ageLabel(focusedOrder.accepted_at)}` : ""}
+            </p>
+          </div>
+
+          <div className="zone-labels" aria-label="System zones">
+            <button
+              type="button"
+              className={`zone-label restaurant ${restaurantFault ? "fault" : ""}`}
+              onClick={(event) =>
+                openDetail(
+                  { kind: "zone", zone: "restaurant" },
+                  event.currentTarget,
+                )
+              }
+            >
+              <span>Restaurant</span>
+              <small>
+                {simFaultLabel(
+                  simFaults?.restaurant,
+                  "Single shared service · aggregate flow",
+                )}
+              </small>
+            </button>
+            <span className="handoff-label">
+              <i aria-hidden="true">⇢</i>
+              Handoff
+            </span>
+            <button
+              type="button"
+              className={`zone-label delivery ${deliveryFault ? "fault" : ""}`}
+              onClick={(event) =>
+                openDetail(
+                  { kind: "zone", zone: "delivery" },
+                  event.currentTarget,
+                )
+              }
+            >
+              <span>Delivery</span>
+              <small>
+                {simFaultLabel(
+                  simFaults?.courier,
+                  "Single shared service · aggregate flow",
+                )}
+              </small>
+            </button>
+          </div>
+
+          <div className="lifecycle-track">
+            <div className="flow-line" aria-hidden="true" />
+            {STAGE_LABELS.map((stage, index) => (
+              <article
+                className={`lifecycle-stage stage-${index + 1}`}
+                key={stage}
+              >
+                <div className="stage-node" aria-hidden="true" />
+                <div className="stage-title">
+                  <span>{STAGE_DESCRIPTIONS[stage]}</span>
+                  <h2>{stateLabel(API_STATE_BY_STAGE[stage])}</h2>
+                  <small>
+                    {STAGE_SEAMS[stage] ??
+                      (stage === "placed"
+                        ? "accepted — waiting for restaurant"
+                        : "current lifecycle state")}
+                  </small>
+                </div>
+                <div className="stage-count">
+                  <strong>{fmt(stageCounts?.[stage])}</strong>
+                  <span>orders</span>
+                </div>
+                <StageTickets
+                  stage={stage}
+                  count={stageCounts?.[stage] ?? 0}
+                  orders={orders}
+                  focusedOrderId={effectiveFocusId}
+                  onOrder={openOrder}
+                />
+              </article>
+            ))}
+          </div>
+
+          <div className="terminal-branches" aria-label="Terminal branches">
+            <div className="branch-spine" aria-hidden="true" />
+            <section className="terminal-branch cancelled">
+              <span className="branch-icon" aria-hidden="true">×</span>
+              <div>
+                <strong>Cancelled</strong>
+                <small>Stopped before the preparation pivot</small>
+              </div>
+              <b>{fmt(conservation?.cancelled)}</b>
+              <div className="branch-tickets">
+                {terminalOrders.cancelled.map((order) => (
+                  <TicketButton
+                    key={order.id}
+                    order={order}
+                    focused={order.id === effectiveFocusId}
+                    onClick={(event) => openOrder(order.id, event.currentTarget)}
+                  />
+                ))}
+              </div>
+            </section>
+            <section className="terminal-branch failed">
+              <span className="branch-icon" aria-hidden="true">!</span>
+              <div>
+                <strong>Failed</strong>
+                <small>Retry budget or business rule ended work</small>
+              </div>
+              <b>{fmt(conservation?.failed)}</b>
+              <div className="branch-tickets">
+                {terminalOrders.failed.map((order) => (
+                  <TicketButton
+                    key={order.id}
+                    order={order}
+                    focused={order.id === effectiveFocusId}
+                    onClick={(event) => openOrder(order.id, event.currentTarget)}
+                  />
+                ))}
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section className="evidence-strip" aria-label="Essential system evidence">
+          <div className="outcome-group">
+            <div className="outcome-heading">
+              <span>Overall performance</span>
+              <strong>Cohort totals</strong>
+              <small>Rates use the last 60 seconds</small>
+            </div>
+            <Metric
+              label="Delivered total"
+              value={fmt(conservation?.delivered)}
+              detail={`Overall rate · ${fmt(rates?.delivered)} / min`}
+              tone="healthy"
+            />
+            <Metric
+              label="Failed total"
+              value={fmt(conservation?.failed)}
+              detail={`Overall rate · ${fmt(rates?.failed)} / min`}
+              tone={(conservation?.failed ?? 0) > 0 ? "fault" : "neutral"}
+            />
+            <Metric
+              label="Cancelled total"
+              value={fmt(conservation?.cancelled)}
+              detail={`Overall rate · ${fmt(rates?.cancelled)} / min`}
+            />
+            <Metric
+              label="P95 end to end"
+              value={`${fmt(snapshot?.e2e_latency_s.p95)}s`}
+              detail={`oldest open ${fmt(snapshot?.oldest_open.age_s)}s`}
+              tone={(snapshot?.oldest_open.age_s ?? 0) > 90 ? "pressure" : "neutral"}
+            />
+          </div>
+
+          <div className="health-group">
+            <button
+              type="button"
+              className={`health-chip ${restaurantTone}`}
+              onClick={(event) =>
+                openDetail(
+                  { kind: "zone", zone: "restaurant" },
+                  event.currentTarget,
+                )
+              }
+            >
+              <span>Restaurant</span>
+              <strong>{healthLabel(restaurantTone)}</strong>
+              <small>{fmt(slots?.restaurant.used)} / {fmt(slots?.restaurant.cap)} slots</small>
+            </button>
+            <button
+              type="button"
+              className={`health-chip ${workerTone}`}
+              onClick={(event) =>
+                openDetail(
+                  { kind: "system", system: "worker" },
+                  event.currentTarget,
+                )
+              }
+            >
+              <span>Workers</span>
+              <strong>{healthLabel(workerTone)}</strong>
+              <small>{fmt(snapshot?.currently_leased)} leased · {fmt(parked.length)} parked</small>
+            </button>
+            <button
+              type="button"
+              className={`health-chip ${deliveryTone}`}
+              onClick={(event) =>
+                openDetail(
+                  { kind: "zone", zone: "delivery" },
+                  event.currentTarget,
+                )
+              }
+            >
+              <span>Delivery</span>
+              <strong>{healthLabel(deliveryTone)}</strong>
+              <small>{fmt(slots?.courier.used)} / {fmt(slots?.courier.cap)} slots</small>
+            </button>
+          </div>
+
+          <button
+            type="button"
+            className={
+              (conservation?.residual ?? 0) === 0 &&
+              snapshot?.duplicate_effects === 0
+                ? "correctness-proof healthy"
+                : "correctness-proof fault"
+            }
+            onClick={(event) =>
+              openDetail({ kind: "correctness" }, event.currentTarget)
+            }
+          >
+            <span className="proof-icon" aria-hidden="true">
+              {(conservation?.residual ?? 0) === 0 ? "✓" : "!"}
+            </span>
+            <span>
+              <small>Correctness proof</small>
+              <strong>
+                {snapshot
+                  ? `${conservation?.accepted ?? 0} orders reconciled`
+                  : "Connecting…"}
+              </strong>
+              <b>
+                Residual {fmt(conservation?.residual)} · duplicate effects{" "}
+                {fmt(snapshot?.duplicate_effects)}
+              </b>
+            </span>
+            <i aria-hidden="true">›</i>
+          </button>
+        </section>
+      </div>
+
+      {railOpen ? (
+        <>
+          <button
+            className="panel-scrim"
+            type="button"
+            aria-label="Hide presenter controls"
+            onClick={closeRail}
+          />
+          <PresenterRail
+            activeScenario={activeScenario}
+            courierFaultActive={deliveryFault}
+            loadgen={loadgen}
+            readyOrders={stageCounts?.ready ?? 0}
+            parkedCourierJobs={parked.filter((row) =>
+              ["dispatch", "poll_ride"].includes(row.work_type),
+            )}
+            onClose={closeRail}
+            onMutation={() => setRefreshEpoch((value) => value + 1)}
+            onScenarioChange={setScenario}
+          />
+        </>
+      ) : null}
+
+      {detailPanel ? (
+        <>
+          <button
+            className="panel-scrim"
+            type="button"
+            aria-label="Close details"
+            onClick={closeDetail}
+          />
+          <DetailsDrawer
+            panel={detailPanel}
+            snapshot={snapshot}
+            order={focusedOrder}
+            trace={trace}
+            lookupId={lookupId}
+            setLookupId={setLookupId}
+            submitLookup={submitLookup}
+            redrive={redrive}
+            redriving={redriving}
+            redriveStatus={redriveStatus}
+            onClose={closeDetail}
+          />
+        </>
+      ) : null}
+    </main>
+  );
+}
+
+function DetailsDrawer({
+  panel,
+  snapshot,
+  order,
+  trace,
+  lookupId,
+  setLookupId,
+  submitLookup,
+  redrive,
+  redriving,
+  redriveStatus,
+  onClose,
+}: {
+  panel: DetailPanel;
+  snapshot: Snapshot | null;
+  order: OrderSummary | null;
+  trace: Snapshot["trace"];
+  lookupId: string;
+  setLookupId: (value: string) => void;
+  submitLookup: () => void;
+  redrive: (workItemId: string) => Promise<void>;
+  redriving: string | null;
+  redriveStatus: string | null;
+  onClose: () => void;
+}) {
+  const title =
+    panel.kind === "order"
+      ? `Order ${order ? displayCode(order.id) : "details"}`
+      : panel.kind === "zone"
+        ? panel.zone === "restaurant"
+          ? "Restaurant zone"
+          : "Delivery zone"
+        : panel.kind === "correctness"
+          ? "Correctness proof"
+          : "Worker system";
+
+  return (
+    <aside className="side-panel details-drawer" aria-label={title}>
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Contextual details</p>
+          <h2>{title}</h2>
+        </div>
+        <button
+          className="icon-button"
+          type="button"
+          onClick={onClose}
+          aria-label="Close details"
+          autoFocus
+        >
+          ×
+        </button>
+      </div>
+
+      {panel.kind === "order" ? (
+        <OrderDetails
+          order={order}
+          trace={trace}
+          snapshot={snapshot}
+          lookupId={lookupId}
+          setLookupId={setLookupId}
+          submitLookup={submitLookup}
+          redrive={redrive}
+          redriving={redriving}
+          redriveStatus={redriveStatus}
+        />
+      ) : null}
+      {panel.kind === "zone" ? (
+        <ZoneDetails zone={panel.zone} snapshot={snapshot} />
+      ) : null}
+      {panel.kind === "correctness" ? (
+        <CorrectnessDetails snapshot={snapshot} />
+      ) : null}
+      {panel.kind === "system" ? (
+        <WorkerDetails
+          snapshot={snapshot}
+          redrive={redrive}
+          redriving={redriving}
+          redriveStatus={redriveStatus}
+        />
+      ) : null}
+    </aside>
+  );
+}
+
+function OrderDetails({
+  order,
+  trace,
+  snapshot,
+  lookupId,
+  setLookupId,
+  submitLookup,
+  redrive,
+  redriving,
+  redriveStatus,
+}: {
+  order: OrderSummary | null;
+  trace: Snapshot["trace"];
+  snapshot: Snapshot | null;
+  lookupId: string;
+  setLookupId: (value: string) => void;
+  submitLookup: () => void;
+  redrive: (workItemId: string) => Promise<void>;
+  redriving: string | null;
+  redriveStatus: string | null;
+}) {
+  const parked = snapshot?.parked_list.filter(
+    (row) => row.order_id === order?.id,
+  ) ?? [];
+  return (
+    <div className="drawer-content">
+      <form
+        className="order-lookup"
+        onSubmit={(event) => {
+          event.preventDefault();
+          submitLookup();
+        }}
+      >
+        <label htmlFor="order-lookup">Paste-an-ID order lookup</label>
+        <div>
+          <input
+            id="order-lookup"
+            value={lookupId}
+            onChange={(event) => setLookupId(event.target.value)}
+            placeholder="Full order UUID"
+            spellCheck={false}
+          />
+          <button type="submit">Follow</button>
+        </div>
+      </form>
+
+      {order ? (
+        <section className="drawer-hero">
+          <span className="large-ticket">{displayCode(order.id)}</span>
+          <div>
+            <span className="state-badge">{stateLabel(order.state)}</span>
+            <p>{order.items.join(" · ")}</p>
+          </div>
+        </section>
+      ) : (
+        <p className="empty-message">
+          This order is outside the recent presentation window. Its trace will
+          appear when the snapshot returns it.
         </p>
-        <p className="group-label">in each stage now</p>
-        <div className="card-grid stages">
-          {STAGE_LABELS.map((label) => (
-            <article className="card" key={label}>
-              <h3>{label}</h3>
-              {STAGE_SEAMS[label] ? (
-                <p className="hint">{STAGE_SEAMS[label]}</p>
-              ) : null}
-              <p className="metric">{fmt(stages?.[label])}</p>
+      )}
+
+      <dl className="detail-list">
+        <div>
+          <dt>Full UUID</dt>
+          <dd className="mono">{order?.id ?? trace?.order_id ?? "—"}</dd>
+        </div>
+        <div>
+          <dt>Accepted</dt>
+          <dd>{order ? new Date(order.accepted_at).toLocaleTimeString() : "—"}</dd>
+        </div>
+        <div>
+          <dt>Attempts</dt>
+          <dd>{fmt(trace?.attempts.length)}</dd>
+        </div>
+      </dl>
+
+      <section className="drawer-section">
+        <div className="drawer-section-heading">
+          <h3>Lifecycle timeline</h3>
+          <span>{trace ? `${trace.order_events.length} events` : "Loading trace…"}</span>
+        </div>
+        <ol className="timeline">
+          {trace?.order_events.map((event) => (
+            <li key={event.id} className={event.applied ? "" : "not-applied"}>
+              <span aria-hidden="true" />
+              <div>
+                <strong>{stateLabel(event.to_state)}</strong>
+                <small>
+                  {new Date(event.timestamp).toLocaleTimeString()} · {event.actor} ·{" "}
+                  {event.cause}
+                  {!event.applied ? " · not applied" : ""}
+                </small>
+              </div>
+            </li>
+          ))}
+          {trace && trace.order_events.length === 0 ? (
+            <li className="empty-message">No events found in this cohort.</li>
+          ) : null}
+        </ol>
+      </section>
+
+      <section className="drawer-section">
+        <div className="drawer-section-heading">
+          <h3>Attempts & ownership</h3>
+          <span>Evidence stays visible</span>
+        </div>
+        <div className="attempt-list">
+          {trace?.attempts.map((attempt) => (
+            <article key={attempt.id}>
+              <div>
+                <strong>{attempt.work_type}</strong>
+                <span className={attempt.outcome ? "attempt-outcome" : "attempt-outcome warning"}>
+                  {attempt.outcome ?? "abandoned / in flight"}
+                </span>
+              </div>
+              <dl>
+                <div><dt>Owner</dt><dd>{attempt.lease_owner}</dd></div>
+                <div><dt>Work item</dt><dd className="mono">{attempt.work_item_id}</dd></div>
+                <div><dt>Idempotency key</dt><dd className="mono">{attempt.idempotency_key}</dd></div>
+              </dl>
             </article>
           ))}
         </div>
-        <div className="card-grid">
-          <article className="card">
-            <h3>terminal rates / min</h3>
-            <p className="hint">
-              How many orders reached an ending in the last 60 seconds. This is
-              the heartbeat when a single order is too small to move the row
-              above.
-            </p>
-            <dl>
-              <div>
-                <dt>delivered</dt>
-                <dd>{fmt(rates?.delivered)}</dd>
-              </div>
-              <div>
-                <dt>cancelled</dt>
-                <dd>{fmt(rates?.cancelled)}</dd>
-              </div>
-              <div>
-                <dt>failed</dt>
-                <dd>{fmt(rates?.failed)}</dd>
-              </div>
-            </dl>
-          </article>
-          <article className="card">
-            <h3>e2e latency (s)</h3>
-            <p className="hint">
-              Accept to delivered, among orders that have already delivered.
-              Empty until the first one finishes.
-            </p>
-            <dl>
-              <div>
-                <dt>p50</dt>
-                <dd>{fmt(e2e?.p50)}</dd>
-              </div>
-              <div>
-                <dt>p95</dt>
-                <dd>{fmt(e2e?.p95)}</dd>
-              </div>
-            </dl>
-          </article>
-          <article className="card">
-            <h3>oldest open</h3>
-            <p className="hint">
-              Age and stage of the oldest non-terminal order in this cohort.
-              Rises in a rush, then falls as the drain completes.
-            </p>
-            <dl>
-              <div>
-                <dt>age (s)</dt>
-                <dd>{fmt(oldest?.age_s)}</dd>
-              </div>
-              <div>
-                <dt>stage</dt>
-                <dd>{oldest?.stage ?? "—"}</dd>
-              </div>
-            </dl>
-          </article>
+      </section>
+
+      {parked.map((row) => (
+        <section className="parked-action" key={row.id}>
+          <span aria-hidden="true">!</span>
+          <div>
+            <strong>Parked {row.work_type}</strong>
+            <p>{row.reason ?? "Retry budget exhausted"} · {row.next_action ?? "Redrive after recovery"}</p>
+            <button
+              type="button"
+              disabled={redriving !== null}
+              onClick={() => void redrive(row.id)}
+            >
+              {redriving === row.id ? "Redriving…" : "Redrive same work item"}
+            </button>
+          </div>
+        </section>
+      ))}
+      {redriveStatus ? <p className="action-status" role="status">{redriveStatus}</p> : null}
+    </div>
+  );
+}
+
+function ZoneDetails({
+  zone,
+  snapshot,
+}: {
+  zone: "restaurant" | "delivery";
+  snapshot: Snapshot | null;
+}) {
+  const lane =
+    zone === "restaurant"
+      ? snapshot?.sim_http.restaurant
+      : snapshot?.sim_http.courier;
+  const slots =
+    zone === "restaurant"
+      ? snapshot?.outbound_slots.restaurant
+      : snapshot?.outbound_slots.courier;
+  const backlog =
+    zone === "restaurant"
+      ? (snapshot?.backlog.confirm ?? 0) + (snapshot?.backlog.poll_cook ?? 0)
+      : (snapshot?.backlog.dispatch ?? 0) + (snapshot?.backlog.poll_ride ?? 0);
+  return (
+    <div className="drawer-content">
+      <section className="drawer-hero zone-hero">
+        <span className="zone-glyph" aria-hidden="true">
+          {zone === "restaurant" ? "R" : "D"}
+        </span>
+        <div>
+          <span className="state-badge">
+            {healthLabel(healthForLane(lane, slots?.used, slots?.cap))}
+          </span>
+          <p>
+            {zone === "restaurant"
+              ? "One shared restaurant simulator; traffic and capacity are aggregate."
+              : "One shared courier simulator; traffic and capacity are aggregate."}
+          </p>
+        </div>
+      </section>
+      <div className="drawer-metrics">
+        <Metric label="Requests" value={fmt(lane?.requests_per_min)} detail="per minute" />
+        <Metric label="P95 latency" value={`${fmt(lane?.latency_p95_s)}s`} detail={`P50 ${fmt(lane?.latency_p50_s)}s`} />
+        <Metric label="Capacity" value={`${fmt(slots?.used)} / ${fmt(slots?.cap)}`} detail={`${fmt(slots?.per_worker_cap)} per worker`} />
+        <Metric label="Backlog" value={fmt(backlog)} detail="pending + leased" />
+      </div>
+      <section className="drawer-section">
+        <h3>Dependency signals · last 60 seconds</h3>
+        <dl className="detail-list">
+          <div><dt>Timeout / unknown</dt><dd>{fmt(lane?.timeout)}</dd></div>
+          <div><dt>HTTP 5xx</dt><dd>{fmt(lane?.http_5xx)}</dd></div>
+          <div><dt>Busy 429</dt><dd>{fmt(lane?.http_429)}</dd></div>
+        </dl>
+      </section>
+      <p className="explain-note">
+        A fault changes the border, icon, label, and supporting evidence. Meaning
+        never depends on color alone.
+      </p>
+    </div>
+  );
+}
+
+function CorrectnessDetails({ snapshot }: { snapshot: Snapshot | null }) {
+  const proof = snapshot?.conservation;
+  return (
+    <div className="drawer-content">
+      <section className="proof-equation">
+        <span>Accepted</span>
+        <strong>{fmt(proof?.accepted)}</strong>
+        <i>=</i>
+        <span>Delivered + cancelled + failed + in flight</span>
+        <strong>
+          {fmt(proof?.delivered)} + {fmt(proof?.cancelled)} + {fmt(proof?.failed)} +{" "}
+          {fmt(proof?.in_flight)}
+        </strong>
+      </section>
+      <div className="invariant-list">
+        <Metric label="Conservation residual" value={fmt(proof?.residual)} detail="must remain zero" tone={(proof?.residual ?? 0) === 0 ? "healthy" : "fault"} />
+        <Metric label="Duplicate effects" value={fmt(snapshot?.duplicate_effects)} detail={`${fmt(snapshot?.duplicate_attempts)} retry attempts are allowed`} tone={snapshot?.duplicate_effects === 0 ? "healthy" : "fault"} />
+        <Metric label="Event mismatches" value={fmt(snapshot?.state_vs_last_order_events_mismatches)} detail="state vs last applied event" tone={(snapshot?.state_vs_last_order_events_mismatches ?? 0) === 0 ? "healthy" : "fault"} />
+        <Metric label="Invalid transitions" value={fmt(snapshot?.invalid_transitions)} detail="lifecycle guard" tone={(snapshot?.invalid_transitions ?? 0) === 0 ? "healthy" : "fault"} />
+        <Metric label="Orphaned tickets" value={fmt(snapshot?.orphaned_tickets)} detail="downstream effects without live work" tone={(snapshot?.orphaned_tickets ?? 0) === 0 ? "healthy" : "fault"} />
+        <Metric label="Startup scan" value={fmt(snapshot?.startup_scan)} detail="orders missing work" tone={(snapshot?.startup_scan ?? 0) === 0 ? "healthy" : "fault"} />
+      </div>
+      <p className="explain-note">
+        Retries may create more attempts. Stable idempotency keys keep external
+        restaurant and courier effects at one.
+      </p>
+    </div>
+  );
+}
+
+function WorkerDetails({
+  snapshot,
+  redrive,
+  redriving,
+  redriveStatus,
+}: {
+  snapshot: Snapshot | null;
+  redrive: (workItemId: string) => Promise<void>;
+  redriving: string | null;
+  redriveStatus: string | null;
+}) {
+  const leased = snapshot?.currently_leased_items ?? [];
+  const parked = snapshot?.parked_list ?? [];
+  return (
+    <div className="drawer-content">
+      <div className="drawer-metrics">
+        <Metric label="Leased now" value={fmt(snapshot?.currently_leased)} detail={`${fmt(snapshot?.outbound_slots.task.cap)} task capacity`} />
+        <Metric label="Retry rate" value={fmt(snapshot?.retry_rate, 2)} detail="failed / unknown re-execution" />
+        <Metric label="No progress" value={fmt(snapshot?.no_progress_beyond_threshold.count)} detail={`beyond ${fmt(snapshot?.no_progress_beyond_threshold.threshold_s)}s`} />
+        <Metric label="Parked" value={fmt(parked.length)} detail="not a lifecycle stage" />
+      </div>
+
+      <section className="drawer-section">
+        <div className="drawer-section-heading">
+          <h3>Currently leased</h3>
+          <span>Owner is evidence for the crash beat</span>
+        </div>
+        <div className="row-list">
+          {leased.map((row) => (
+            <article key={row.id}>
+              <strong>{displayCode(row.order_id)} · {row.work_type}</strong>
+              <span>{row.owner ?? "unowned"}</span>
+              <small>lease until {new Date(row.lease_until).toLocaleTimeString()}</small>
+            </article>
+          ))}
+          {leased.length === 0 ? <p className="empty-message">No active leases.</p> : null}
         </div>
       </section>
 
-      <section className="pane">
-        <h2>Pipeline</h2>
-        <p className="pane-intro">
-          Intake, work-item backlog, retries, counted 429s, stretching ETAs, and
-          per-sim HTTP errors plus fleet-scaled outbound slot use. Same GET
-          /snapshot keys the walk already polls.
-        </p>
-        <div className="card-grid">
-          <article className="card">
-            <h3>accept / reject</h3>
-            <p className="hint">
-              Accepted orders vs door 429s (no order row). Kitchen and courier
-              busy are a different no.
-            </p>
-            <dl>
-              <div>
-                <dt>accepted</dt>
-                <dd>{fmt(acceptReject?.accepted)}</dd>
-              </div>
-              <div>
-                <dt>rejected</dt>
-                <dd>{fmt(acceptReject?.rejected)}</dd>
-              </div>
-            </dl>
-          </article>
-          <article className="card">
-            <h3>backlog by work type</h3>
-            <p className="hint">
-              Pending + leased work items. Parked is not backlog.
-            </p>
-            <dl>
-              <div>
-                <dt>confirm</dt>
-                <dd>{fmt(backlog?.confirm)}</dd>
-              </div>
-              <div>
-                <dt>poll_cook</dt>
-                <dd>{fmt(backlog?.poll_cook)}</dd>
-              </div>
-              <div>
-                <dt>dispatch</dt>
-                <dd>{fmt(backlog?.dispatch)}</dd>
-              </div>
-              <div>
-                <dt>poll_ride</dt>
-                <dd>{fmt(backlog?.poll_ride)}</dd>
-              </div>
-            </dl>
-          </article>
-          <article className="card">
-            <h3>retry rate</h3>
-            <p className="metric">{fmt(snapshot?.retry_rate)}</p>
-            <p className="hint">
-              Fraction of calls in the last 60s that follow a failed, unknown,
-              or abandoned call. Routine successful polls are excluded.
-            </p>
-          </article>
-          <article className="card">
-            <h3>429s</h3>
-            <p className="hint">
-              Counted busy. Door = intake fuse. Kitchen / courier = quoted wait
-              &gt; 3× that ticket&apos;s quiet time.
-            </p>
-            <dl>
-              <div>
-                <dt>door</dt>
-                <dd>{fmt(http429s?.door)}</dd>
-              </div>
-              <div>
-                <dt>kitchen</dt>
-                <dd>{fmt(http429s?.kitchen)}</dd>
-              </div>
-              <div>
-                <dt>courier</dt>
-                <dd>{fmt(http429s?.courier)}</dd>
-              </div>
-            </dl>
-          </article>
-          <article className="card">
-            <h3>stretching ETAs</h3>
-            <p className="hint">
-              In-flight orders whose quoted wait exceeds quiet cook. The rush
-              beat is promises stretching, not ticket 21.
-            </p>
-            <dl>
-              <div>
-                <dt>count</dt>
-                <dd>{fmt(stretching?.count)}</dd>
-              </div>
-              <div>
-                <dt>max stretch (s)</dt>
-                <dd>{fmt(stretching?.max_stretch_s)}</dd>
-              </div>
-            </dl>
-          </article>
-          <article className="card">
-            <h3>restaurant HTTP</h3>
-            <p className="hint">
-              Kitchen work: confirm and poll_cook. Timeout includes dropped or
-              otherwise unknown responses; retry meaning is the same.
-            </p>
-            <dl>
-              <div>
-                <dt>req / min</dt>
-                <dd>{fmt(simHttp?.restaurant.requests_per_min)}</dd>
-              </div>
-              <div>
-                <dt>p50 (s)</dt>
-                <dd>{fmt(simHttp?.restaurant.latency_p50_s)}</dd>
-              </div>
-              <div>
-                <dt>p95 (s)</dt>
-                <dd>{fmt(simHttp?.restaurant.latency_p95_s)}</dd>
-              </div>
-              <div>
-                <dt>timeout / 60s</dt>
-                <dd>{fmt(simHttp?.restaurant.timeout)}</dd>
-              </div>
-              <div>
-                <dt>5xx / 60s</dt>
-                <dd>{fmt(simHttp?.restaurant.http_5xx)}</dd>
-              </div>
-              <div>
-                <dt>429 / 60s</dt>
-                <dd>{fmt(simHttp?.restaurant.http_429)}</dd>
-              </div>
-            </dl>
-          </article>
-          <article className="card">
-            <h3>courier HTTP</h3>
-            <p className="hint">Dispatch and poll_ride.</p>
-            <dl>
-              <div>
-                <dt>req / min</dt>
-                <dd>{fmt(simHttp?.courier.requests_per_min)}</dd>
-              </div>
-              <div>
-                <dt>p50 (s)</dt>
-                <dd>{fmt(simHttp?.courier.latency_p50_s)}</dd>
-              </div>
-              <div>
-                <dt>p95 (s)</dt>
-                <dd>{fmt(simHttp?.courier.latency_p95_s)}</dd>
-              </div>
-              <div>
-                <dt>timeout / 60s</dt>
-                <dd>{fmt(simHttp?.courier.timeout)}</dd>
-              </div>
-              <div>
-                <dt>5xx / 60s</dt>
-                <dd>{fmt(simHttp?.courier.http_5xx)}</dd>
-              </div>
-              <div>
-                <dt>429 / 60s</dt>
-                <dd>{fmt(simHttp?.courier.http_429)}</dd>
-              </div>
-            </dl>
-          </article>
-          <article className="card">
-            <h3>outbound slots — fleet</h3>
-            <p className="hint">
-              Active leases vs configured cap: {fmt(outboundSlots?.worker_replicas)}
-              workers × the reported per-worker limit. This is configured
-              topology, not live replica discovery.
-            </p>
-            <dl>
-              <div>
-                <dt>restaurant</dt>
-                <dd>
-                  {fmt(outboundSlots?.restaurant.used)} / {fmt(outboundSlots?.restaurant.cap)}
-                </dd>
-              </div>
-              <div>
-                <dt>courier</dt>
-                <dd>
-                  {fmt(outboundSlots?.courier.used)} / {fmt(outboundSlots?.courier.cap)}
-                </dd>
-              </div>
-              <div>
-                <dt>all tasks</dt>
-                <dd>
-                  {fmt(outboundSlots?.task.used)} / {fmt(outboundSlots?.task.cap)}
-                </dd>
-              </div>
-            </dl>
-          </article>
+      <section className="drawer-section">
+        <div className="drawer-section-heading">
+          <h3>Parked work</h3>
+          <span>Recover dependency before Redrive</span>
+        </div>
+        <div className="row-list parked-rows">
+          {parked.map((row) => (
+            <article key={row.id}>
+              <strong>{displayCode(row.order_id)} · {row.work_type}</strong>
+              <span>{row.owner ?? "unowned"} · {row.reason ?? "budget exhausted"}</span>
+              <small>{row.next_action ?? "Redrive after recovery"}</small>
+              <button
+                type="button"
+                disabled={redriving !== null}
+                onClick={() => void redrive(row.id)}
+              >
+                {redriving === row.id ? "Redriving…" : "Redrive"}
+              </button>
+            </article>
+          ))}
+          {parked.length === 0 ? <p className="empty-message">No parked work.</p> : null}
         </div>
       </section>
-
-      <section className="pane">
-        <h2>Correctness</h2>
-        <p className="pane-intro">
-          Residual and duplicate effects should stay 0. Attempts may retry;
-          kitchen and courier tickets must not.
-        </p>
-        <div className="card-grid">
-          <article className="card">
-            <h3>conservation residual</h3>
-            <p className="metric">{fmt(conservation?.residual)}</p>
-            <p className="hint">
-              State-partition check: accepted {fmt(conservation?.accepted)}{" "}
-              = delivered {fmt(conservation?.delivered)} + cancelled{" "}
-              {fmt(conservation?.cancelled)} + failed {fmt(conservation?.failed)}{" "}
-              + in_flight {fmt(conservation?.in_flight)}; parked{" "}
-              {fmt(conservation?.parked)} ⊂ in_flight. Parked work is stalled,
-              not a stage. This reconciles current rows; the event mismatch card
-              is the independent history check.
-            </p>
-          </article>
-          <article className="card">
-            <h3>duplicate attempts vs duplicate effects</h3>
-            <p className="hint">
-              Re-executions after failed, unknown, or abandoned calls vs extra
-              tickets in the sim ledgers. Routine successful polls are excluded;
-              effects must stay 0. A dash means a sim ledger could not be read.
-            </p>
-            <dl>
-              <div>
-                <dt>attempts</dt>
-                <dd>{fmt(snapshot?.duplicate_attempts)}</dd>
-              </div>
-              <div>
-                <dt>effects</dt>
-                <dd>{fmt(snapshot?.duplicate_effects)}</dd>
-              </div>
-            </dl>
-          </article>
-          <article className="card">
-            <h3>startup scan</h3>
-            <p className="metric">{fmt(snapshot?.startup_scan)}</p>
-            <p className="hint">Orders accepted with no work item. Should stay 0.</p>
-          </article>
-          <article className="card">
-            <h3>invalid transitions</h3>
-            <p className="metric">{fmt(snapshot?.invalid_transitions)}</p>
-            <p className="hint">
-              Illegal moves, counted and not applied — for example cancel after
-              cooking started.
-            </p>
-          </article>
-          <article className="card">
-            <h3>orphaned tickets</h3>
-            <p className="metric">{fmt(snapshot?.orphaned_tickets)}</p>
-            <p className="hint">
-              Kitchen tickets whose void exhausted after cancel won. The diner
-              book stays cancelled.
-            </p>
-          </article>
-          <article className="card">
-            <h3>currently-leased</h3>
-            <p className="metric">{fmt(snapshot?.currently_leased)}</p>
-            <p className="hint">
-              Work items in the middle of an outbound call. Record an order and
-              owner here before the scenario-3 Docker kill. 0 means the workers
-              are idle or down.
-            </p>
-            {leased.length > 0 ? (
-              <ul className="leased-list">
-                {leased.map((row) => (
-                  <li key={row.id}>
-                    <code>{row.order_id}</code> · {row.work_type} · owner{" "}
-                    <code>{row.owner ?? "—"}</code>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-          </article>
-          <article className="card">
-            <h3>state-vs-last-event mismatch</h3>
-            <p className="metric">{fmt(snapshot?.state_vs_last_order_events_mismatches)}</p>
-            <p className="hint">
-              Current order state does not match the last applied event. Should
-              stay 0 on a clean walk.
-            </p>
-          </article>
-          <article className="card">
-            <h3>no progress beyond threshold</h3>
-            <p className="metric">{fmt(noProgress?.count)}</p>
-            <p className="hint">
-              In-flight orders whose last applied event is older than{" "}
-              {fmt(noProgress?.threshold_s)}s. Park is a work-item status, not a
-              stage.
-            </p>
-          </article>
-        </div>
-        <article className="card parked">
-          <h3>parked list</h3>
-          <p className="hint">
-            Owner, reason, and next action. Clear the dependency fault, then
-            Redrive the same stored job. Parked work is stalled, not lost, and
-            not a lifecycle stage.
-          </p>
-          {redriveStatus ? <p className="hint">{redriveStatus}</p> : null}
-          {parked.length === 0 ? (
-            <p className="hint">None in this cohort.</p>
-          ) : (
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>order</th>
-                    <th>work</th>
-                    <th>owner</th>
-                    <th>reason</th>
-                    <th>next action</th>
-                    <th>operator</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {parked.map((row) => (
-                    <tr key={row.id}>
-                      <td>{row.order_id}</td>
-                      <td>{row.work_type}</td>
-                      <td>{row.owner ?? "—"}</td>
-                      <td>{row.reason ?? "—"}</td>
-                      <td>{row.next_action ?? "—"}</td>
-                      <td>
-                        <button
-                          className="redrive-button"
-                          type="button"
-                          disabled={redriving === row.id}
-                          onClick={() => void redrive(row.id)}
-                        >
-                          {redriving === row.id ? "Redriving…" : "Redrive"}
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </article>
-        <article className="card trace">
-          <h3>paste-an-ID trace</h3>
-          <p className="hint">
-            Watch one order walk. The stage row is a crowd; this is the
-            per-order story.
-          </p>
-          <label>
-            order id
-            <input
-              value={orderId}
-              onChange={(event) => setOrderId(event.target.value)}
-              placeholder="uuid"
-              spellCheck={false}
-              autoComplete="off"
-            />
-          </label>
-          {trace ? (
-            <div className="trace-body">
-              <p>
-                order {trace.order_id} · {trace.order_events.length} events ·{" "}
-                {trace.attempts.length} attempts
-              </p>
-              <ol>
-                {trace.order_events.map((event) => (
-                  <li key={event.id}>
-                    {event.from_state ?? "—"} → {event.to_state} ({event.cause}
-                    {event.applied ? "" : ", evidence"})
-                  </li>
-                ))}
-              </ol>
-              <ol>
-                {trace.attempts.map((attempt) => (
-                  <li key={attempt.id}>
-                    {attempt.work_type} {attempt.outcome ?? "NULL"} · {attempt.lease_owner} ·{" "}
-                    {attempt.idempotency_key} · {attempt.work_item_id} {attempt.started_at}
-                    {attempt.ended_at ? ` → ${attempt.ended_at}` : ""}
-                  </li>
-                ))}
-              </ol>
-            </div>
-          ) : (
-            <p className="hint">Paste an order id to load events and attempts.</p>
-          )}
-        </article>
-      </section>
-    </main>
+      {redriveStatus ? <p className="action-status" role="status">{redriveStatus}</p> : null}
+    </div>
   );
 }

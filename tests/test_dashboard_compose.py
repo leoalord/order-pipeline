@@ -83,9 +83,13 @@ def test_dashboard_serves_spa_and_control_load_group() -> None:
     home_src = _http("GET", f"{DASHBOARD_URL}/src/HomePage.tsx")
     assert home_src.status_code == 200, home_src.text
     assert "STAGE_LABELS" in home_src.text
-    assert "queued" in home_src.text
-    assert "cooking" in home_src.text
-    assert "waiting for" in home_src.text
+    assert "Every order, one visible journey" in home_src.text
+    assert "Restaurant accepted" in home_src.text
+    assert "Preparation underway" in home_src.text
+    assert "Ready for pickup" in home_src.text
+    assert "ticket-stack" in home_src.text
+    assert "Presenter controls" in home_src.text
+    assert "DetailsDrawer" in home_src.text
     assert "accept_reject" in home_src.text
     assert "http_429s" in home_src.text
     assert "outbound_slots" in home_src.text
@@ -109,10 +113,10 @@ def test_dashboard_serves_spa_and_control_load_group() -> None:
     assert "/rsim/admin/faults" in control_src.text
     assert "blackout" in control_src.text.lower()
     assert "seconds: 60" in control_src.text
-    assert "Crash assist" in control_src.text
+    assert "Worker crash" in control_src.text
     assert "/csim/admin/faults" in control_src.text
     assert "seconds: 30" in control_src.text
-    assert "Bonuses" in control_src.text
+    assert "Setup & bonus beats" in control_src.text
     assert "Cancel race" in control_src.text
     assert "Fail void" in control_src.text
     assert "Out of stock" in control_src.text
@@ -120,7 +124,7 @@ def test_dashboard_serves_spa_and_control_load_group() -> None:
     assert "/loadgen/beat/place" in control_src.text
     assert "/rsim/admin/stock" in control_src.text
     assert "kill" not in control_src.text.lower()
-    assert "redrive" not in control_src.text.lower()
+    assert "Redrive" in control_src.text
 
 
 def test_dashboard_proxy_snapshot_and_reserved_sim_paths() -> None:
@@ -137,6 +141,9 @@ def test_dashboard_proxy_snapshot_and_reserved_sim_paths() -> None:
     csim = _http("GET", f"{DASHBOARD_URL}/csim/health")
     assert csim.status_code == 200, csim.text
     assert csim.json() == {"status": "ok"}
+    capacity = _http("GET", f"{DASHBOARD_URL}/csim/admin/capacity")
+    assert capacity.status_code == 200, capacity.text
+    assert capacity.json()["fleet_size"] >= 1
     compose = (REPO_ROOT / "docker-compose.yml").read_text()
     assert "LOADGEN_PROXY_TARGET: http://loadgen:8090" in compose
     assert "\n  loadgen:" in compose

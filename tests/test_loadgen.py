@@ -104,6 +104,14 @@ def test_open_loop_does_not_slow_on_429() -> None:
     assert driver.placed == 0
 
 
+def test_conservative_default_h_allows_scenarios_before_calibration() -> None:
+    driver = OpenLoopDriver(LoadgenSettings(default_h=0.25), FakePipeline())
+
+    assert driver.h == 0.25
+    assert driver.steady_rps() == 0.1
+    assert driver.rush_rps() == 0.375
+
+
 def test_rate_change_starts_a_new_clock_and_stop_fires_nothing_late() -> None:
     fake = FakePipeline()
     driver = OpenLoopDriver(LoadgenSettings(), fake, rng=random.Random(2))

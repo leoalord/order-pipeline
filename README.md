@@ -187,7 +187,7 @@ Compose publishes Postgres on `127.0.0.1:55432` — loopback only, and off the d
 
 Loadgen is the same Python image, `command: ["loadgen"]`, host **8090**. Open-loop: it keeps the offered rate even when the API returns 429 (counted rejects, never a silent drop, never a generator slowdown). Cart mix is mostly 1-item plus some 2–3. Every `POST /orders` sends the current `cohort_id`.
 
-H is this machine's sustainable rate (highest stepped rate whose snapshot backlog stays flat), measured **once** at full topology (two workers, rail, door). Mix stays **on** during calibrate. A small absolute fill-in allowance applies only while WIP is at most four; a populated pipeline must show zero backlog growth. After finding the first overloaded step, calibrate keeps probing up to its cap until a kitchen/courier 429 proves the 3× brake (or a door 429 identifies the wrong first brake). If no positive H is found, steady and rush return 409 instead of starting a zero-rate scenario.
+H is this machine's sustainable rate (highest stepped rate whose snapshot backlog stays flat). The demo boots with the conservative measured baseline `LOADGEN_DEFAULT_H=0.25`, so Normal and Rush work immediately; calibrate can replace it after a topology or host-capacity change. Mix stays **on** during calibrate. A small absolute fill-in allowance applies only while WIP is at most four; a populated pipeline must show zero backlog growth. After finding the first overloaded step, calibrate keeps probing up to its cap until a kitchen/courier 429 proves the 3× brake (or a door 429 identifies the wrong first brake). If an explicit calibration finds no positive H, steady and rush return 409 instead of starting a zero-rate scenario.
 
 ```bash
 # Flakiness on (compose default) before calibrate:
@@ -253,6 +253,10 @@ Watch—not a curl—is the runbook's operator path for `POST /work-items/{id}/r
 ## Faults
 
 Restaurant sim admin on `localhost:8081` and courier sim admin on `localhost:8082` share one router. Sticky mode defaults **off**. Always-on mix defaults **on**: `RSIM_FLAKY_5XX_PCT=3` / `RSIM_FLAKY_DROP_PCT=2`, mirrored on `CSIM_*`. The 5xx slice of that mix includes after-effect 5xx (write, then 500). `GET /admin/faults` shows the live mix (percentages + mode + `blackout_remaining_s`).
+
+Courier capacity starts at `CSIM_FLEET_SIZE=8` and can be changed live for presentation beats with `GET /admin/capacity` and `POST /admin/capacity` `{"fleet_size": 16}` on the courier sim. The presenter rail exposes the same setting as a 4–32 slider. A change affects quotes for new dispatches immediately; existing ticket ETAs remain stable, and parked dispatch work still requires Redrive. Restarting the courier sim restores its configured boot fleet.
+
+Courier assignment does not advance the order lifecycle. An accepted courier ticket with status `assigned` reserves a future fleet slot while the order remains `ready`; the worker advances it to `out_for_delivery` only when the courier reports `en_route` (pickup), then to `delivered` at completion. No additional lifecycle value is introduced.
 
 ```bash
 curl -sS http://localhost:8081/admin/faults

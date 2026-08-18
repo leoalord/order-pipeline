@@ -91,7 +91,7 @@ class OpenLoopDriver:
         self.client = client
         self.rng = rng or random.Random()
         self.cohort_id: UUID = DEFAULT_COHORT_ID
-        self.h: float | None = None
+        self.h: float | None = settings.default_h
         self.rate_rps = 0.0
         self.placed = 0
         self.rejected_429 = 0

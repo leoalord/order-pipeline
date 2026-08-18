@@ -136,6 +136,10 @@ def test_snapshot_fields_cohort_filter_and_trace_null_attempts(
     assert snap.state_vs_last_order_events_mismatches == 0
     assert snap.currently_leased == 0
     assert snap.currently_leased_items == []
+    assert len(snap.orders) == 1
+    assert snap.orders[0].id == order_id
+    assert snap.orders[0].state == "confirmed"
+    assert snap.orders[0].items == ["chips"]
     assert tuple(snap.stages) == STAGE_NAMES
     assert snap.stages["confirmed"] == 1
     assert snap.backlog["confirm"] == 1
@@ -403,6 +407,44 @@ def test_stretching_etas_measure_only_sim_rail_wait(
 
     assert snap.stretching_etas.count == 1
     assert snap.stretching_etas.max_stretch_s == 10.0
+
+
+def test_stretching_etas_include_assigned_courier_while_order_stays_ready(
+    session_factory: sessionmaker[Session],
+) -> None:
+    cohort = uuid.uuid4()
+    now = datetime.now(UTC)
+    with session_factory() as session:
+        session.begin()
+        try:
+            assigned = _place(session, cohort_id=cohort)
+            assigned.state = "ready"
+            assigned.version += 1
+            accepted_at = now
+            pickup_at = now + timedelta(seconds=15)
+            session.add(
+                WorkItem(
+                    order_id=assigned.id,
+                    work_type="poll_ride",
+                    status="pending",
+                    idempotency_key=f"assigned-poll-{assigned.id}",
+                    attempt_count=0,
+                    next_attempt_at=pickup_at,
+                    payload={
+                        "accepted_at": accepted_at.isoformat(),
+                        "service_started_at": pickup_at.isoformat(),
+                        "estimated_ready_at": (pickup_at + timedelta(seconds=20)).isoformat(),
+                    },
+                )
+            )
+            session.flush()
+            snap = build_snapshot(session, cohort_id=cohort, now=now, ledger_counts=())
+        finally:
+            session.rollback()
+
+    assert snap.stages["ready"] == 1
+    assert snap.stretching_etas.count == 1
+    assert snap.stretching_etas.max_stretch_s == 15.0
 
 
 def test_startup_scan_and_mismatch_and_leased_and_parked_outside(

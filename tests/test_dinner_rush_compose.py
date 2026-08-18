@@ -135,9 +135,10 @@ def test_faults_3_2_before_calibrate_and_pane_binds_429s() -> None:
         assert body["mode"] == "off"
     home = (REPO_ROOT / "dashboard" / "src" / "HomePage.tsx").read_text()
     assert "http_429s" in home
-    assert "http429s?.door" in home or "http_429s.door" in home
-    assert "http429s?.kitchen" in home or "http_429s.kitchen" in home
-    assert "http429s?.courier" in home or "http_429s.courier" in home
+    assert "busy?.door" in home
+    assert "busy?.kitchen" in home
+    assert "busy?.courier" in home
+    assert "busy 429s" in home
     snap = _http("GET", f"{DASHBOARD_URL}/snapshot")
     assert snap.status_code == 200, snap.text
     body = snap.json()

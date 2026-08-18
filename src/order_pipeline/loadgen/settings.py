@@ -23,6 +23,9 @@ class LoadgenSettings(BaseSettings):
     rush_multiplier: float = 1.5
     steady_fraction: float = 0.4
     rush_duration_s: float = 60.0
+    # Conservative, measured demo baseline. Calibration remains available to
+    # replace it when the deployment topology or host capacity changes.
+    default_h: float = 0.25
     calibrate_step_s: float = 25.0
     calibrate_start_rps: float = 0.25
     calibrate_factor: float = 1.35
@@ -40,6 +43,7 @@ class LoadgenSettings(BaseSettings):
         assert self.rush_multiplier > 1.0, "rush_multiplier must be > 1.0 so rush crosses H"
         assert self.steady_fraction > 0, "steady_fraction must be > 0"
         assert self.rush_duration_s > 0, "rush_duration_s must be > 0"
+        assert self.default_h > 0, "default_h must be > 0"
         assert self.calibrate_step_s > 0, "calibrate_step_s must be > 0"
         assert self.calibrate_start_rps > 0, "calibrate_start_rps must be > 0"
         assert self.calibrate_factor > 1.0, "calibrate_factor must be > 1.0"

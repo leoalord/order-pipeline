@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 
 from fastapi import FastAPI
+from pydantic import BaseModel, Field
 
 from order_pipeline.courier.quote import quote_dispatch, trip_seconds
 from order_pipeline.courier.settings import CSIMSettings
@@ -15,6 +17,38 @@ from order_pipeline.sim.app import create_sim_app
 from order_pipeline.sim.core import Quote, QuoteError, SimCore
 from order_pipeline.sim.faults import FaultState
 from order_pipeline.sim.ledger import Effect, EffectLedger
+
+
+class CourierCapacityCommand(BaseModel):
+    """Live fleet-size change used by the presenter controls."""
+
+    fleet_size: int = Field(ge=1, le=64)
+
+
+class CourierCapacity:
+    """Thread-safe, process-local courier fleet capacity."""
+
+    def __init__(self, fleet_size: int) -> None:
+        self.boot_fleet_size = fleet_size
+        self._fleet_size = fleet_size
+        self._lock = threading.Lock()
+
+    def get(self) -> int:
+        with self._lock:
+            return self._fleet_size
+
+    def set(self, fleet_size: int) -> int:
+        with self._lock:
+            self._fleet_size = fleet_size
+            return self._fleet_size
+
+    def view(self) -> dict[str, int]:
+        return {
+            "fleet_size": self.get(),
+            "boot_fleet_size": self.boot_fleet_size,
+            "min_fleet_size": 1,
+            "max_fleet_size": 64,
+        }
 
 
 def _occupancy(
@@ -54,13 +88,14 @@ def build_app(
 ) -> FastAPI:
     trip_s = settings.trip_s.as_map()
     ledger = EffectLedger(settings.ledger_path)
+    capacity = CourierCapacity(settings.fleet_size)
 
     def quote(body: dict[str, Any], now: datetime) -> Quote:
         return quote_dispatch(
             body,
             now,
             trip_s=trip_s,
-            fleet_size=settings.fleet_size,
+            fleet_size=capacity.get(),
             busy_multiple=settings.busy_multiple,
             occupancy=_occupancy(ledger, now, trip_s=trip_s),
         )
@@ -102,7 +137,18 @@ def build_app(
             settings.sim_timeout_s + 0.5 if blackout_hang_s is None else blackout_hang_s
         ),
     )
-    return create_sim_app(title="Courier sim", core=core)
+    app = create_sim_app(title="Courier sim", core=core)
+
+    @app.get("/admin/capacity")
+    def get_capacity() -> dict[str, int]:
+        return capacity.view()
+
+    @app.post("/admin/capacity")
+    def set_capacity(command: CourierCapacityCommand) -> dict[str, int]:
+        capacity.set(command.fleet_size)
+        return capacity.view()
+
+    return app
 
 
 def create_app() -> FastAPI:

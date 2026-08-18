@@ -133,6 +133,48 @@ def test_second_dispatch_waits_when_the_only_bike_is_busy(
         assert second_start == first_eta
 
 
+def test_live_capacity_increase_adds_a_courier_for_new_dispatches(
+    tmp_path: Path, clock: MutableClock
+) -> None:
+    settings = CSIMSettings(
+        ledger_path=tmp_path / "live-capacity.sqlite",
+        flaky_5xx_pct=0.0,
+        flaky_drop_pct=0.0,
+        fleet_size=1,
+    )
+    app = build_app(settings, now_fn=clock, blackout_hang_s=0.0)
+    with TestClient(app) as client:
+        initial = client.get("/admin/capacity")
+        assert initial.status_code == 200
+        assert initial.json() == {
+            "fleet_size": 1,
+            "boot_fleet_size": 1,
+            "min_fleet_size": 1,
+            "max_fleet_size": 64,
+        }
+
+        first = _dispatch(client, "near", f"capacity-1-{uuid.uuid4()}")
+        assert first.status_code == 200, first.text
+
+        scaled = client.post("/admin/capacity", json={"fleet_size": 2})
+        assert scaled.status_code == 200, scaled.text
+        assert scaled.json()["fleet_size"] == 2
+        assert scaled.json()["boot_fleet_size"] == 1
+
+        second = _dispatch(client, "near", f"capacity-2-{uuid.uuid4()}")
+        assert second.status_code == 200, second.text
+        assert second.json()["status"] == "en_route"
+        assert second.json()["service_started_at"] == second.json()["accepted_at"]
+
+
+def test_live_capacity_rejects_values_outside_guardrails(client: TestClient) -> None:
+    too_small = client.post("/admin/capacity", json={"fleet_size": 0})
+    too_large = client.post("/admin/capacity", json={"fleet_size": 65})
+    assert too_small.status_code == 422
+    assert too_large.status_code == 422
+    assert client.get("/admin/capacity").json()["fleet_size"] == 8
+
+
 def test_five_xx_before_writes_no_ledger_row(client: TestClient) -> None:
     set_mode = client.post("/admin/faults", json={"mode": "5xx_before"})
     assert set_mode.status_code == 200
