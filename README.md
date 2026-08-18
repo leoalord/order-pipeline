@@ -188,6 +188,10 @@ curl -sS http://localhost:8082/admin/faults
 curl -sS -X POST http://localhost:8090/calibrate
 # → {"h": …, "downstream_429_observed": true, "http_429s": {…}, …}
 
+# Calibration deliberately crosses the overload line and may leave probe work parked.
+# Isolate the demo evidence before scenario 0; scenarios 0 and 1 then share this cohort.
+curl -sS -X POST http://localhost:8090/cohort/new
+
 curl -sS -X POST http://localhost:8090/scenario/steady     # 0.4×H
 curl -sS -X POST http://localhost:8090/scenario/rush       # 60s @1.5×H, then drain to 0.4×H
 curl -sS -X POST 'http://localhost:8090/scenario/rush?mult=2.0'
