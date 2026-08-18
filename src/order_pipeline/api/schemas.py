@@ -185,3 +185,4 @@ class SnapshotResponse(BaseModel):
     sim_http: SimHttp
     outbound_slots: OutboundSlots
     no_progress_beyond_threshold: NoProgress
+    orphaned_tickets: int

@@ -179,6 +179,31 @@ export function ControlPage() {
         </div>
       </section>
 
+      <section className="pane">
+        <h2>Bonuses</h2>
+        <p className="pane-intro">
+          Cancel race places then cancels to collide with confirm. Fail void is
+          sticky restaurant 500s on void — Abort with Clear restaurant (
+          <code>clear</code>).
+        </p>
+        <div className="control-row">
+          <button
+            type="button"
+            disabled={busy !== null}
+            onClick={() => void run("/loadgen/beat/cancel-race")}
+          >
+            Cancel race
+          </button>
+          <button
+            type="button"
+            disabled={busy !== null}
+            onClick={() => void run("/rsim/admin/faults", { mode: "fail_void" })}
+          >
+            Fail void
+          </button>
+        </div>
+      </section>
+
       <p className="hint last-post">
         {busy ? `posting ${busy}…` : null}
         {!busy && last

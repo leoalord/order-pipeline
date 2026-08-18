@@ -27,6 +27,7 @@ def main() -> None:
     rides = CourierHandlers(settings, courier, now_fn=lambda: worker.now_fn())
     worker.register("confirm", kitchen.confirm)
     worker.register("poll_cook", kitchen.poll_cook)
+    worker.register("void_ticket", kitchen.void_ticket)
     worker.register("dispatch", rides.dispatch)
     worker.register("poll_ride", rides.poll_ride)
     health_app = create_health_app(engine)

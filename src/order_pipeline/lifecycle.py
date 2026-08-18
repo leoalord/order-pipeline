@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 CAUSE_INVALID = "invalid_transition"
+CAUSE_ORPHANED = "orphaned_ticket"
 
 # This is the executable form of the design document's lifecycle table.
 # Guarded writes provide serialization; this table decides whether an arrow is

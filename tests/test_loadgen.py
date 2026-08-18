@@ -343,3 +343,36 @@ def test_loadgen_http_health_cohort_steady_rush_stop() -> None:
         assert "cohort_id" in cohort.json()
         again = client.post("/calibrate", json={"step_s": 0.05, "start_rps": 1.0, "max_rps": 1.0})
         assert again.status_code == 200
+
+
+class FakeCancelRace:
+    def __init__(self) -> None:
+        self.calls: list[UUID] = []
+
+    async def run(self, cohort_id: UUID) -> dict[str, Any]:
+        self.calls.append(cohort_id)
+        return {
+            "order_id": "11111111-1111-4111-8111-111111111111",
+            "cohort_id": str(cohort_id),
+            "cancel_status": 200,
+            "state": "cancelled",
+        }
+
+    async def aclose(self) -> None:
+        return None
+
+
+def test_cancel_race_beat_uses_injected_runner() -> None:
+    fake = FakePipeline()
+    runner = FakeCancelRace()
+    app = create_app(LoadgenSettings(), client=fake, cancel_race=runner)
+    with TestClient(app) as client:
+        missing = create_app(LoadgenSettings(), client=fake)
+        with TestClient(missing) as bare:
+            assert bare.post("/beat/cancel-race").status_code == 503
+        response = client.post("/beat/cancel-race")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["state"] == "cancelled"
+        assert body["cancel_status"] == 200
+        assert runner.calls == [UUID(body["cohort_id"])]

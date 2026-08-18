@@ -160,6 +160,7 @@ export type Snapshot = {
   sim_http: SimHttp;
   outbound_slots: OutboundSlots;
   no_progress_beyond_threshold: NoProgress;
+  orphaned_tickets: number;
 };
 
 export const POLL_MS = 1000;

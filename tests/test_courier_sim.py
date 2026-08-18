@@ -165,6 +165,16 @@ def test_clear_shows_mix_off(client: TestClient) -> None:
     assert fetched.json()["mode"] == "off"
 
 
+def test_fail_void_is_rejected_without_changing_courier_faults(
+    client: TestClient,
+) -> None:
+    before = client.get("/admin/faults").json()
+    response = client.post("/admin/faults", json={"mode": "fail_void"})
+    assert response.status_code == 422
+    assert response.json()["detail"] == "fail_void is restaurant-only"
+    assert client.get("/admin/faults").json() == before
+
+
 def test_blackout_post_get_then_expires(client: TestClient, clock: MutableClock) -> None:
     armed = client.post("/admin/faults", json={"mode": "blackout", "seconds": 2})
     assert armed.status_code == 200, armed.text

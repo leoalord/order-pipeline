@@ -83,6 +83,10 @@ class FakeRestaurantClient:
         self.get_calls.append(idempotency_key)
         return httpx.Response(200, json=self.poll_body)
 
+    async def void(self, *, idempotency_key: str, body: dict[str, Any]) -> httpx.Response:
+        del idempotency_key, body
+        raise AssertionError("void must not run in this test")
+
 
 def _claim(
     session: Session,

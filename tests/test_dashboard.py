@@ -58,6 +58,8 @@ def test_dashboard_source_has_assignment_stage_cards_and_lite_fields() -> None:
     assert "duplicate_effects" in home
     assert "startup_scan" in home
     assert "invalid_transitions" in home
+    assert "orphaned_tickets" in home
+    assert "orphaned_tickets" in snapshot
     assert "conservation" in home
     assert "terminal_rates_per_min" in home
     assert "e2e_latency_s" in home
@@ -130,7 +132,11 @@ def test_control_load_group_posts_to_loadgen_proxy() -> None:
     assert 'run("/csim/admin/faults", { mode: "blackout", seconds: 30 })' in control
     assert "Courier blackout (30s)" in control
     assert "redrive" not in control.lower()
-    assert "fail_void" not in control.lower()
+    assert "Bonuses" in control
+    assert "Cancel race" in control
+    assert "Fail void" in control
+    assert "/loadgen/beat/cancel-race" in control
+    assert "fail_void" in control.lower()
     assert "stock" not in control.lower()
     assert "kill" not in control.lower()
     assert 'target="_blank"' in shell

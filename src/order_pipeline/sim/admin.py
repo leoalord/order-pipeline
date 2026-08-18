@@ -14,7 +14,7 @@ from order_pipeline.sim.core import ExistingEffectConflict, SimCore
 class FaultsPost(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    mode: Literal["clear", "5xx_before", "5xx_after", "drop", "blackout"]
+    mode: Literal["clear", "5xx_before", "5xx_after", "drop", "blackout", "fail_void"]
     seconds: float | None = None
     mix: Literal["off", "on"] | None = None
 
@@ -57,7 +57,7 @@ class ConfirmUnavailablePost(BaseModel):
         return targets
 
 
-def admin_router(core: SimCore) -> APIRouter:
+def admin_router(core: SimCore, *, allow_fail_void: bool) -> APIRouter:
     router = APIRouter(prefix="/admin")
 
     @router.get("/faults")
@@ -66,6 +66,8 @@ def admin_router(core: SimCore) -> APIRouter:
 
     @router.post("/faults")
     def post_faults(body: FaultsPost) -> dict[str, Any]:
+        if body.mode == "fail_void" and not allow_fail_void:
+            raise HTTPException(status_code=422, detail="fail_void is restaurant-only")
         try:
             return core.set_fault_command(
                 body.mode,

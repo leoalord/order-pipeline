@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Literal
 
-FaultCommand = Literal["clear", "5xx_before", "5xx_after", "drop", "blackout"]
+FaultCommand = Literal["clear", "5xx_before", "5xx_after", "drop", "blackout", "fail_void"]
 NowFn = Callable[[], datetime]
 
 
@@ -18,6 +18,7 @@ class FaultMode(StrEnum):
     FIVE_XX_AFTER = "5xx_after"
     DROP = "drop"
     BLACKOUT = "blackout"
+    FAIL_VOID = "fail_void"
 
 
 _COMMAND_TO_MODE: dict[FaultCommand, FaultMode] = {
@@ -26,6 +27,7 @@ _COMMAND_TO_MODE: dict[FaultCommand, FaultMode] = {
     "5xx_after": FaultMode.FIVE_XX_AFTER,
     "drop": FaultMode.DROP,
     "blackout": FaultMode.BLACKOUT,
+    "fail_void": FaultMode.FAIL_VOID,
 }
 
 
