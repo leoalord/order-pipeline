@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from order_pipeline.menu import MENU_ITEM_IDS
-from order_pipeline.restaurant.stock import DEFAULT_STOCK
+from order_pipeline.restaurant.stock import BONUS_RESTORE_STOCK
 
 RSIM_URL = "http://localhost:8081"
 CSIM_URL = "http://localhost:8082"
@@ -84,7 +84,7 @@ def restore_restaurant_stock() -> None:
         try:
             response = httpx.post(
                 f"{RSIM_URL}/admin/stock",
-                json={"item": item, "count": DEFAULT_STOCK},
+                json={"item": item, "count": BONUS_RESTORE_STOCK},
                 timeout=5.0,
             )
         except httpx.RequestError:

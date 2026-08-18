@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from order_pipeline.models import Attempt, Order, WorkItem
-from order_pipeline.restaurant.stock import DEFAULT_STOCK
+from order_pipeline.restaurant.stock import BONUS_RESTORE_STOCK
 from tests.sim_admin import (
     CSIM_URL,
     RSIM_URL,
@@ -154,7 +154,7 @@ def test_two_item_cart_fails_whole_order_and_consumes_nothing(
     set_restaurant_stock("burrito", 0)
     try:
         before = _http("GET", f"{RSIM_URL}/admin/stock").json()
-        assert before["chips"] == DEFAULT_STOCK
+        assert before["chips"] == BONUS_RESTORE_STOCK
         assert before["burrito"] == 0
         cohort_id = uuid.uuid4()
         placed = _http(

@@ -34,7 +34,7 @@ def test_code_defaults() -> None:
     assert settings.cook_s.burrito == 25.0
     assert settings.extra_item_s == 5.0
     assert settings.rail_fuse == 80
-    assert settings.stock_default == 200
+    assert settings.stock_default == 10_000
     assert settings.flaky_5xx_pct == 3.0
     assert settings.flaky_drop_pct == 2.0
     assert settings.sim_timeout_s == 2.0

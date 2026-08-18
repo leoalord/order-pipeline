@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 
 def _iso(value: datetime) -> str:
@@ -26,6 +27,9 @@ class Effect:
     accepted_at: datetime
     estimated_ready_at: datetime
     payload: dict[str, Any]
+
+
+CounterInsertResult = Literal["inserted", "exists", "unavailable"]
 
 
 class EffectLedger:
@@ -76,31 +80,109 @@ class EffectLedger:
 
     def insert(self, effect: Effect) -> bool:
         """Insert the effect. Returns False if the key already exists."""
-        payload_json = json.dumps(effect.payload, separators=(",", ":"))
-        created_at = _iso(effect.accepted_at)
         with self._lock:
             try:
-                self._conn.execute(
-                    """
-                    INSERT INTO effects (
-                        idempotency_key, ticket_id, accepted_at,
-                        estimated_ready_at, payload_json, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        effect.idempotency_key,
-                        effect.ticket_id,
-                        _iso(effect.accepted_at),
-                        _iso(effect.estimated_ready_at),
-                        payload_json,
-                        created_at,
-                    ),
-                )
+                self._insert_effect(effect)
                 self._conn.commit()
             except sqlite3.IntegrityError:
                 self._conn.rollback()
                 return False
         return True
+
+    def initialize_counters(self, defaults: Mapping[str, int]) -> None:
+        """Create durable named counters without overwriting an existing value."""
+        if not defaults or any(count < 0 for count in defaults.values()):
+            raise ValueError("counter defaults must be non-negative")
+        with self._lock:
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS counters (
+                    name TEXT PRIMARY KEY,
+                    count INTEGER NOT NULL CHECK (count >= 0)
+                )
+                """
+            )
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO counters (name, count) VALUES (?, ?)",
+                sorted(defaults.items()),
+            )
+            self._conn.commit()
+
+    def counter_snapshot(self, names: Sequence[str]) -> dict[str, int]:
+        """Read the requested durable counters."""
+        if not names:
+            return {}
+        placeholders = ", ".join("?" for _ in names)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT name, count FROM counters WHERE name IN ({placeholders})",  # noqa: S608
+                tuple(names),
+            ).fetchall()
+        snapshot = {str(row["name"]): int(row["count"]) for row in rows}
+        missing = set(names) - set(snapshot)
+        if missing:
+            raise KeyError(f"counters are not initialized: {sorted(missing)}")
+        return snapshot
+
+    def set_counter(self, name: str, count: int) -> None:
+        """Set one initialized counter durably."""
+        if count < 0:
+            raise ValueError("counter must be non-negative")
+        with self._lock:
+            result = self._conn.execute(
+                "UPDATE counters SET count = ? WHERE name = ?",
+                (count, name),
+            )
+            if result.rowcount != 1:
+                self._conn.rollback()
+                raise KeyError(f"counter is not initialized: {name}")
+            self._conn.commit()
+
+    def insert_with_counter_decrements(
+        self,
+        effect: Effect,
+        decrements: Mapping[str, int],
+    ) -> CounterInsertResult:
+        """Atomically insert an effect and consume its durable counters.
+
+        ``BEGIN IMMEDIATE`` serializes the check/decrement across processes using
+        the same SQLite ledger. Any unavailable counter or insert failure rolls
+        the entire transaction back, so inventory and effect durability cannot
+        diverge.
+        """
+        if not decrements or any(count < 1 for count in decrements.values()):
+            raise ValueError("counter decrements must be positive")
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                existing = self._conn.execute(
+                    "SELECT 1 FROM effects WHERE idempotency_key = ?",
+                    (effect.idempotency_key,),
+                ).fetchone()
+                if existing is not None:
+                    self._conn.rollback()
+                    return "exists"
+                for name, count in sorted(decrements.items()):
+                    updated = self._conn.execute(
+                        """
+                        UPDATE counters
+                        SET count = count - ?
+                        WHERE name = ? AND count >= ?
+                        """,
+                        (count, name, count),
+                    )
+                    if updated.rowcount != 1:
+                        self._conn.rollback()
+                        return "unavailable"
+                self._insert_effect(effect)
+                self._conn.commit()
+            except sqlite3.IntegrityError:
+                self._conn.rollback()
+                return "exists"
+            except BaseException:
+                self._conn.rollback()
+                raise
+        return "inserted"
 
     def counts_by_key(self) -> dict[str, int]:
         with self._lock:
@@ -116,6 +198,26 @@ class EffectLedger:
                 "SELECT * FROM effects ORDER BY accepted_at, ticket_id"
             ).fetchall()
         return [self._row_to_effect(row) for row in rows]
+
+    def _insert_effect(self, effect: Effect) -> None:
+        payload_json = json.dumps(effect.payload, separators=(",", ":"))
+        created_at = _iso(effect.accepted_at)
+        self._conn.execute(
+            """
+            INSERT INTO effects (
+                idempotency_key, ticket_id, accepted_at,
+                estimated_ready_at, payload_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                effect.idempotency_key,
+                effect.ticket_id,
+                _iso(effect.accepted_at),
+                _iso(effect.estimated_ready_at),
+                payload_json,
+                created_at,
+            ),
+        )
 
     @staticmethod
     def _row_to_effect(row: sqlite3.Row) -> Effect:

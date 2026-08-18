@@ -83,8 +83,16 @@ class AcceptOutcome:
     detail: str | None = None
 
 
+@dataclass(frozen=True)
+class AcceptCommitResult:
+    """Result of a service-specific atomic first-effect commit."""
+
+    inserted: bool
+    rejection: AcceptOutcome | None = None
+
+
 NewAcceptCheck = Callable[[dict[str, Any]], AcceptOutcome | None]
-NewAcceptApply = Callable[[dict[str, Any]], None]
+NewAcceptCommit = Callable[[Effect, dict[str, Any]], AcceptCommitResult]
 
 
 class SimCore:
@@ -103,7 +111,7 @@ class SimCore:
         rng: Rng | None = None,
         blackout_hang_s: float = 0.0,
         check_new_accept: NewAcceptCheck | None = None,
-        apply_new_accept: NewAcceptApply | None = None,
+        commit_new_accept: NewAcceptCommit | None = None,
     ) -> None:
         self.ledger = ledger
         self.faults = faults
@@ -117,7 +125,7 @@ class SimCore:
         self._rng = rng or random.Random()
         self.blackout_hang_s = blackout_hang_s
         self._check_new_accept = check_new_accept
-        self._apply_new_accept = apply_new_accept
+        self._commit_new_accept = commit_new_accept
         # Quote reads current rail occupancy and insert reserves the chosen slot.
         # Keep that read/quote/write sequence atomic across concurrent HTTP accepts.
         # Restaurant /admin/stock uses the same lock so set/restore cannot
@@ -251,7 +259,13 @@ class SimCore:
             estimated_ready_at=quote.estimated_ready_at,
             payload=quote.payload,
         )
-        inserted = self.ledger.insert(effect)
+        if self._commit_new_accept is None:
+            commit = AcceptCommitResult(inserted=self.ledger.insert(effect))
+        else:
+            commit = self._commit_new_accept(effect, body)
+        if commit.rejection is not None:
+            return commit.rejection
+        inserted = commit.inserted
         if not inserted:
             raced = self.ledger.get_by_key(idempotency_key)
             if raced is None:
@@ -261,11 +275,6 @@ class SimCore:
                     detail="ledger insert failed",
                 )
             return self._replay(raced, body)
-
-        # First ledger row and stock decrement share this lock. Replay never
-        # reaches here, so a stored confirm key cannot consume inventory twice.
-        if self._apply_new_accept is not None:
-            self._apply_new_accept(body)
 
         if injected is FaultMode.FIVE_XX_AFTER:
             return AcceptOutcome(

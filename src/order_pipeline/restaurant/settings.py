@@ -6,6 +6,8 @@ from typing import Self
 from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from order_pipeline.restaurant.stock import DEFAULT_STOCK
+
 
 class CookTimes(BaseModel):
     """Per-item quiet cook seconds. Config: chips 12 / taco 18 / burrito 25."""
@@ -28,7 +30,7 @@ class RSIMSettings(BaseSettings):
     cook_s: CookTimes = Field(default_factory=CookTimes)
     extra_item_s: float = 5.0
     rail_fuse: int = 80
-    stock_default: int = 200
+    stock_default: int = DEFAULT_STOCK
     flaky_5xx_pct: float = 3.0
     flaky_drop_pct: float = 2.0
     sim_timeout_s: float = 2.0

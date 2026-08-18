@@ -9,7 +9,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
 from order_pipeline.menu import MENU_ITEM_IDS
 from order_pipeline.restaurant.quote import parse_accept_items, quiet_cook_s, quote_accept
@@ -21,7 +21,13 @@ from order_pipeline.restaurant.stock import (
     MenuStock,
 )
 from order_pipeline.sim.app import IdempotencyKeyHeader, create_sim_app
-from order_pipeline.sim.core import AcceptOutcome, Quote, QuoteError, SimCore
+from order_pipeline.sim.core import (
+    AcceptCommitResult,
+    AcceptOutcome,
+    Quote,
+    QuoteError,
+    SimCore,
+)
 from order_pipeline.sim.drop import DroppedResponse
 from order_pipeline.sim.faults import FaultState
 from order_pipeline.sim.ledger import Effect, EffectLedger
@@ -31,7 +37,7 @@ class StockPost(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     item: str
-    count: int = Field(ge=0)
+    count: StrictInt = Field(ge=0)
 
     @field_validator("item")
     @classmethod
@@ -94,7 +100,7 @@ def build_app(
     cook_s = settings.cook_s.as_map()
     extra_item_s = settings.extra_item_s
     ledger = EffectLedger(settings.ledger_path)
-    stock = MenuStock(default=settings.stock_default)
+    stock = MenuStock(ledger, default=settings.stock_default)
 
     def quote(body: dict[str, Any], now: datetime) -> Quote:
         return quote_accept(
@@ -146,9 +152,19 @@ def build_app(
             )
         return None
 
-    def consume_stock(body: dict[str, Any]) -> None:
+    def commit_stock(effect: Effect, body: dict[str, Any]) -> AcceptCommitResult:
         items = parse_accept_items(body)
-        stock.decrement(items)
+        result = stock.insert_accept(effect, items)
+        if result == "unavailable":
+            return AcceptCommitResult(
+                inserted=False,
+                rejection=AcceptOutcome(
+                    action="reject",
+                    status_code=OUT_OF_STOCK_STATUS,
+                    detail=OUT_OF_STOCK_DETAIL,
+                ),
+            )
+        return AcceptCommitResult(inserted=result == "inserted")
 
     core = SimCore(
         ledger=ledger,
@@ -162,7 +178,7 @@ def build_app(
             settings.sim_timeout_s + 0.5 if blackout_hang_s is None else blackout_hang_s
         ),
         check_new_accept=check_stock,
-        apply_new_accept=consume_stock,
+        commit_new_accept=commit_stock,
     )
     app = create_sim_app(title="Restaurant sim", core=core, allow_fail_void=True)
 
