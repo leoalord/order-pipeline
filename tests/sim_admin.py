@@ -7,6 +7,9 @@ from typing import Any
 import httpx
 import pytest
 
+from order_pipeline.menu import MENU_ITEM_IDS
+from order_pipeline.restaurant.stock import DEFAULT_STOCK
+
 RSIM_URL = "http://localhost:8081"
 CSIM_URL = "http://localhost:8082"
 
@@ -57,4 +60,34 @@ def restore_demo_mix() -> None:
                 timeout=5.0,
             )
         except httpx.RequestError:
+            continue
+
+
+def set_restaurant_stock(item: str, count: int) -> dict[str, int]:
+    try:
+        response = httpx.post(
+            f"{RSIM_URL}/admin/stock",
+            json={"item": item, "count": count},
+            timeout=5.0,
+        )
+    except httpx.RequestError as exc:
+        pytest.fail(f"restaurant stock admin failed: {exc}")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert isinstance(body, dict)
+    return {str(key): int(value) for key, value in body.items()}
+
+
+def restore_restaurant_stock() -> None:
+    """Abort leftover zeros so scenario 0 cannot OOS after a failed beat."""
+    for item in sorted(MENU_ITEM_IDS):
+        try:
+            response = httpx.post(
+                f"{RSIM_URL}/admin/stock",
+                json={"item": item, "count": DEFAULT_STOCK},
+                timeout=5.0,
+            )
+        except httpx.RequestError:
+            continue
+        if response.status_code != 200:
             continue

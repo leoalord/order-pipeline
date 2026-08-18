@@ -9,15 +9,36 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from order_pipeline.restaurant.quote import quiet_cook_s, quote_accept
+from order_pipeline.menu import MENU_ITEM_IDS
+from order_pipeline.restaurant.quote import parse_accept_items, quiet_cook_s, quote_accept
 from order_pipeline.restaurant.settings import RSIMSettings
 from order_pipeline.restaurant.status import kitchen_status
+from order_pipeline.restaurant.stock import (
+    OUT_OF_STOCK_DETAIL,
+    OUT_OF_STOCK_STATUS,
+    MenuStock,
+)
 from order_pipeline.sim.app import IdempotencyKeyHeader, create_sim_app
-from order_pipeline.sim.core import Quote, QuoteError, SimCore
+from order_pipeline.sim.core import AcceptOutcome, Quote, QuoteError, SimCore
 from order_pipeline.sim.drop import DroppedResponse
 from order_pipeline.sim.faults import FaultState
 from order_pipeline.sim.ledger import Effect, EffectLedger
+
+
+class StockPost(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item: str
+    count: int = Field(ge=0)
+
+    @field_validator("item")
+    @classmethod
+    def item_is_on_menu(cls, value: str) -> str:
+        if value not in MENU_ITEM_IDS:
+            raise ValueError(f"unknown item id: {value!r}; menu is chips, taco, burrito")
+        return value
 
 
 def _occupancy(
@@ -73,6 +94,7 @@ def build_app(
     cook_s = settings.cook_s.as_map()
     extra_item_s = settings.extra_item_s
     ledger = EffectLedger(settings.ledger_path)
+    stock = MenuStock(default=settings.stock_default)
 
     def quote(body: dict[str, Any], now: datetime) -> Quote:
         return quote_accept(
@@ -111,6 +133,23 @@ def build_app(
             quiet_cook_s=cook,
         )
 
+    def check_stock(body: dict[str, Any]) -> AcceptOutcome | None:
+        try:
+            items = parse_accept_items(body)
+        except QuoteError:
+            return None
+        if stock.unavailable(items):
+            return AcceptOutcome(
+                action="reject",
+                status_code=OUT_OF_STOCK_STATUS,
+                detail=OUT_OF_STOCK_DETAIL,
+            )
+        return None
+
+    def consume_stock(body: dict[str, Any]) -> None:
+        items = parse_accept_items(body)
+        stock.decrement(items)
+
     core = SimCore(
         ledger=ledger,
         faults=FaultState(now_fn=now_fn),
@@ -122,8 +161,20 @@ def build_app(
         blackout_hang_s=(
             settings.sim_timeout_s + 0.5 if blackout_hang_s is None else blackout_hang_s
         ),
+        check_new_accept=check_stock,
+        apply_new_accept=consume_stock,
     )
     app = create_sim_app(title="Restaurant sim", core=core, allow_fail_void=True)
+
+    @app.get("/admin/stock")
+    def get_stock() -> dict[str, int]:
+        with core.accept_lock:
+            return stock.snapshot()
+
+    @app.post("/admin/stock")
+    def post_stock(body: StockPost) -> dict[str, int]:
+        with core.accept_lock:
+            return stock.set(body.item, body.count)
 
     @app.post("/void")
     def post_void(

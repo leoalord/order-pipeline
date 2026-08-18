@@ -83,6 +83,10 @@ class AcceptOutcome:
     detail: str | None = None
 
 
+NewAcceptCheck = Callable[[dict[str, Any]], AcceptOutcome | None]
+NewAcceptApply = Callable[[dict[str, Any]], None]
+
+
 class SimCore:
     """Shared accept/poll/key-cache/ledger/faults. Restaurant and courier share this."""
 
@@ -98,6 +102,8 @@ class SimCore:
         now_fn: NowFn | None = None,
         rng: Rng | None = None,
         blackout_hang_s: float = 0.0,
+        check_new_accept: NewAcceptCheck | None = None,
+        apply_new_accept: NewAcceptApply | None = None,
     ) -> None:
         self.ledger = ledger
         self.faults = faults
@@ -110,9 +116,13 @@ class SimCore:
         self._now = now_fn or _utc_now
         self._rng = rng or random.Random()
         self.blackout_hang_s = blackout_hang_s
+        self._check_new_accept = check_new_accept
+        self._apply_new_accept = apply_new_accept
         # Quote reads current rail occupancy and insert reserves the chosen slot.
         # Keep that read/quote/write sequence atomic across concurrent HTTP accepts.
-        self._accept_lock = threading.Lock()
+        # Restaurant /admin/stock uses the same lock so set/restore cannot
+        # interleave with a decrement.
+        self.accept_lock = threading.Lock()
 
     def ping(self) -> None:
         self.ledger.ping()
@@ -166,7 +176,7 @@ class SimCore:
         Existing effects mean a worker beat the fixture to the restaurant. Refuse
         the cohort instead of pretending those orders are still safely doomed.
         """
-        with self._accept_lock:
+        with self.accept_lock:
             existing = [key for key in targets if self.ledger.get_by_key(key) is not None]
             if existing:
                 raise ExistingEffectConflict(existing)
@@ -177,7 +187,7 @@ class SimCore:
         return self.ledger.counts_by_key()
 
     def accept(self, idempotency_key: str, body: dict[str, Any]) -> AcceptOutcome:
-        with self._accept_lock:
+        with self.accept_lock:
             return self._accept_locked(idempotency_key, body)
 
     def _accept_locked(self, idempotency_key: str, body: dict[str, Any]) -> AcceptOutcome:
@@ -211,6 +221,12 @@ class SimCore:
                 status_code=exc.status_code,
                 detail=exc.detail,
             )
+        # Stock (or any new-accept reserve) wins over a busy 429 so a zero
+        # counter is a permanent 4xx, not a retryable kitchen-full signal.
+        if self._check_new_accept is not None:
+            reserved = self._check_new_accept(body)
+            if reserved is not None:
+                return reserved
         if quote.reject_status is not None:
             return AcceptOutcome(
                 action="reject",
@@ -246,6 +262,11 @@ class SimCore:
                 )
             return self._replay(raced, body)
 
+        # First ledger row and stock decrement share this lock. Replay never
+        # reaches here, so a stored confirm key cannot consume inventory twice.
+        if self._apply_new_accept is not None:
+            self._apply_new_accept(body)
+
         if injected is FaultMode.FIVE_XX_AFTER:
             return AcceptOutcome(
                 action="five_xx",
@@ -275,7 +296,7 @@ class SimCore:
 
     def void(self, idempotency_key: str, body: dict[str, Any]) -> AcceptOutcome:
         """Stripe-style void under `(order_id, void)`. fail_void 500s before the write."""
-        with self._accept_lock:
+        with self.accept_lock:
             return self._void_locked(idempotency_key, body)
 
     def _void_locked(self, idempotency_key: str, body: dict[str, Any]) -> AcceptOutcome:

@@ -91,7 +91,7 @@ Calibrate reads `backlog`, `oldest_open`, and `http_429s` from this same GET. `o
 
 ### Dashboard
 
-Vite SPA on **5173**. `/` is metrics cards plus the one operator write, **Redrive**. Three panes: **Business** (stages + terminal rates + e2e + oldest-age and stage), **Pipeline** (accept/reject, backlog by work type, retry rate, 429s, stretching ETAs, per-sim rate/latency), **Correctness** (lite fields + no-progress-beyond-threshold + parked list). The currently-leased card lists each active lease's order, work type, and worker owner so the crash beat can record the exact order before the terminal kill. The parked list shows work-item id-backed rows with order / work type / owner / reason / next action; clear the dependency fault before pressing Redrive. `/control` groups are load (Calibrate · New cohort · Steady · Rush with optional **mult** · Stop), outage (Doom-confirm · Restaurant blackout 60s · Clear restaurant), crash assist (**Courier blackout 30s only**), and **Bonuses** (Cancel race · Fail void). Buttons POST through the same-origin `/loadgen`, `/rsim`, or `/csim` proxies. There is no browser Kill button. Abort leftover `fail_void` with **Clear restaurant** (`{"mode":"clear"}`) — it sticks if you skip that. Header **Controls** opens `/control` in a new tab; the two routes do not share React state. Watch independently reads `/loadgen/status` on every poll, so a cohort minted in Control appears there without cross-tab state.
+Vite SPA on **5173**. `/` is metrics cards plus the one operator write, **Redrive**. Three panes: **Business** (stages + terminal rates + e2e + oldest-age and stage), **Pipeline** (accept/reject, backlog by work type, retry rate, 429s, stretching ETAs, per-sim rate/latency), **Correctness** (lite fields + no-progress-beyond-threshold + parked list). The currently-leased card lists each active lease's order, work type, and worker owner so the crash beat can record the exact order before the terminal kill. The parked list shows work-item id-backed rows with order / work type / owner / reason / next action; clear the dependency fault before pressing Redrive. `/control` groups are load (Calibrate · New cohort · Steady · Rush with optional **mult** · Stop), outage (Doom-confirm · Restaurant blackout 60s · Clear restaurant), crash assist (**Courier blackout 30s only**), and **Bonuses** (Cancel race · Fail void · Out of stock · Place · Restore stock). Buttons POST through the same-origin `/loadgen`, `/rsim`, or `/csim` proxies. There is no browser Kill button. Abort leftover `fail_void` with **Clear restaurant** (`{"mode":"clear"}`) — it sticks if you skip that. Header **Controls** opens `/control` in a new tab; the two routes do not share React state. Watch independently reads `/loadgen/status` on every poll, so a cohort minted in Control appears there without cross-tab state.
 
 Same-origin proxy (browser never needs extra `VITE_` knobs for sims/loadgen):
 
@@ -142,9 +142,13 @@ curl -sS -X POST http://localhost:8081/void \
   -H 'Content-Type: application/json' \
   -d '{"accept_key":"(order-id, confirm)"}'
 curl -sS http://localhost:8081/admin/ledger
+curl -sS http://localhost:8081/admin/stock
+curl -sS -X POST http://localhost:8081/admin/stock \
+  -H 'Content-Type: application/json' \
+  -d '{"item":"burrito","count":0}'
 ```
 
-The same `Idempotency-Key` replays the first result (Stripe-style). Timeout retries must reuse that key — never mint a new one. `GET /admin/ledger` returns effect counts by key from the sim's SQLite ledger (not Postgres).
+The same `Idempotency-Key` replays the first result (Stripe-style). Timeout retries must reuse that key — never mint a new one. `GET /admin/ledger` returns effect counts by key from the sim's SQLite ledger (not Postgres). Menu-item stock (`chips` / `taco` / `burrito`, default 200) is restaurant-only. A cart with any zero-stock item is a business 4xx: no ledger row, no decrement, whole order fails. A successful new accept decrements each requested item once; the same stored confirm key replays without a second decrement. Courier has no `/admin/stock`.
 
 ### Courier sim
 
@@ -202,6 +206,9 @@ curl -sS -X POST http://localhost:8090/scenario/rush       # 60s @1.5×H, then d
 curl -sS -X POST 'http://localhost:8090/scenario/rush?mult=2.0'
 curl -sS -X POST http://localhost:8090/beat/doom-confirm   # returns 3 explicitly doomed ids
 curl -sS -X POST http://localhost:8090/beat/cancel-race    # rehearsal: place + cancel vs confirm
+curl -sS -X POST http://localhost:8090/beat/place \
+  -H 'Content-Type: application/json' \
+  -d '{"item":"burrito"}'   # returns order_id; not a new scenario
 curl -sS -X POST http://localhost:8090/stop
 curl -sS -X POST http://localhost:8090/cohort/new
 ```
@@ -263,7 +270,7 @@ curl -sS -X POST http://localhost:8081/admin/faults \
   -d '{"mode":"clear","mix":"on"}'
 ```
 
-`mode` is `clear` (off), `5xx_before` (fail before the ledger write), `5xx_after` (write then 5xx), `drop` (apply the effect, then close without a body — timeline D), **`blackout`** (timed; accepts and ordinary ticket/key reads cannot succeed inside the 2s timeout — drop, classified unknown, same key), or restaurant-only **`fail_void`** (sticky 500s on new `POST /void` calls so the void budget of 3 can exhaust; same-key void replays stay cached, and accepts retain the always-on mix). Health and admin endpoints remain available so the dependency can be observed and cleared. Blackout defaults off on **both** 8081 and 8082. Doom-confirm's targeted restaurant rule is separate from this mode and is listed as `confirm_unavailable` by `GET /admin/faults`; it remains active after a 60s blackout expires. `clear` removes the global mode, `fail_void`, and the targeted set. **Abort leftover `fail_void` with `clear`** — leaving it on pollutes later voids and the orphan count. `/control` keeps the scenario-2 `/rsim` outage group unchanged and adds a separate crash-assist group whose only write is courier `{"mode":"blackout","seconds":30}` through `/csim`. Container kill/restart stays in the Docker terminal; Redrive stays on Watch. Bonuses: Cancel race (`/loadgen/beat/cancel-race`) and Fail void (`/rsim` `fail_void`).
+`mode` is `clear` (off), `5xx_before` (fail before the ledger write), `5xx_after` (write then 5xx), `drop` (apply the effect, then close without a body — timeline D), **`blackout`** (timed; accepts and ordinary ticket/key reads cannot succeed inside the 2s timeout — drop, classified unknown, same key), or restaurant-only **`fail_void`** (sticky 500s on new `POST /void` calls so the void budget of 3 can exhaust; same-key void replays stay cached, and accepts retain the always-on mix). Health and admin endpoints remain available so the dependency can be observed and cleared. Blackout defaults off on **both** 8081 and 8082. Doom-confirm's targeted restaurant rule is separate from this mode and is listed as `confirm_unavailable` by `GET /admin/faults`; it remains active after a 60s blackout expires. `clear` removes the global mode, `fail_void`, and the targeted set. **Abort leftover `fail_void` with `clear`** — leaving it on pollutes later voids and the orphan count. `/control` keeps the scenario-2 `/rsim` outage group unchanged and adds a separate crash-assist group whose only write is courier `{"mode":"blackout","seconds":30}` through `/csim`. Container kill/restart stays in the Docker terminal; Redrive stays on Watch. Bonuses: Cancel race (`/loadgen/beat/cancel-race`), Fail void (`/rsim` `fail_void`), Out of stock / Restore stock (`/rsim` `/admin/stock`), Place (`/loadgen/beat/place`). **Abort leftover burrito=0 with Restore stock (`count: 200`)** — leaving it at 0 poisons scenario 0.
 
 ```bash
 # Timed blackout on either sim (seconds required)

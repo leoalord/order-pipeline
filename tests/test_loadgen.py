@@ -376,3 +376,37 @@ def test_cancel_race_beat_uses_injected_runner() -> None:
         assert body["state"] == "cancelled"
         assert body["cancel_status"] == 200
         assert runner.calls == [UUID(body["cohort_id"])]
+
+
+class FakeBeatPlace:
+    def __init__(self) -> None:
+        self.calls: list[tuple[UUID, str]] = []
+
+    async def run(self, cohort_id: UUID, item: str) -> dict[str, Any]:
+        self.calls.append((cohort_id, item))
+        return {
+            "order_id": "22222222-2222-4222-8222-222222222222",
+            "cohort_id": str(cohort_id),
+            "item": item,
+        }
+
+    async def aclose(self) -> None:
+        return None
+
+
+def test_beat_place_uses_injected_runner() -> None:
+    fake = FakePipeline()
+    runner = FakeBeatPlace()
+    app = create_app(LoadgenSettings(), client=fake, beat_place=runner)
+    with TestClient(app) as client:
+        missing = create_app(LoadgenSettings(), client=fake)
+        with TestClient(missing) as bare:
+            assert bare.post("/beat/place", json={"item": "burrito"}).status_code == 503
+        unknown = client.post("/beat/place", json={"item": "chicken_burrito"})
+        assert unknown.status_code == 422
+        response = client.post("/beat/place", json={"item": "burrito"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["item"] == "burrito"
+        assert body["order_id"] == "22222222-2222-4222-8222-222222222222"
+        assert runner.calls == [(UUID(body["cohort_id"]), "burrito")]

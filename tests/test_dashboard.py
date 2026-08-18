@@ -135,9 +135,23 @@ def test_control_load_group_posts_to_loadgen_proxy() -> None:
     assert "Bonuses" in control
     assert "Cancel race" in control
     assert "Fail void" in control
+    assert "Out of stock" in control
+    assert "Restore stock" in control
     assert "/loadgen/beat/cancel-race" in control
+    assert "/loadgen/beat/place" in control
+    assert "/rsim/admin/stock" in control
     assert "fail_void" in control.lower()
-    assert "stock" not in control.lower()
+    assert control.index("Cancel race") < control.index("Fail void")
+    assert control.index("Fail void") < control.index("Out of stock")
+    oos = control.index('run("/rsim/admin/stock", { item: "burrito", count: 0 })')
+    place = control.index('run("/loadgen/beat/place", { item: "burrito" })')
+    restore = control.index('run("/rsim/admin/stock", { item: "burrito", count: 200 })')
+    assert oos < place < restore
+    assert control.index("Out of stock") < control.index("Restore stock")
+    assert "Pre-demo" in control
+    assert "Load" in control
+    assert "Outage" in control
+    assert "Crash assist" in control
     assert "kill" not in control.lower()
     assert 'target="_blank"' in shell
     assert 'href="/control"' in shell

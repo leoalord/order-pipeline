@@ -13,6 +13,7 @@ def _clear_rsim_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "RSIM_BUSY_MULTIPLE",
         "RSIM_EXTRA_ITEM_S",
         "RSIM_RAIL_FUSE",
+        "RSIM_STOCK_DEFAULT",
         "RSIM_FLAKY_5XX_PCT",
         "RSIM_FLAKY_DROP_PCT",
         "RSIM_SIM_TIMEOUT_S",
@@ -33,6 +34,7 @@ def test_code_defaults() -> None:
     assert settings.cook_s.burrito == 25.0
     assert settings.extra_item_s == 5.0
     assert settings.rail_fuse == 80
+    assert settings.stock_default == 200
     assert settings.flaky_5xx_pct == 3.0
     assert settings.flaky_drop_pct == 2.0
     assert settings.sim_timeout_s == 2.0
@@ -55,6 +57,11 @@ def test_flakiness_sum_at_50_fails_boot() -> None:
 def test_busy_multiple_below_two_fails_boot() -> None:
     with pytest.raises(ValidationError):
         RSIMSettings(busy_multiple=1)
+
+
+def test_stock_default_below_one_fails_boot() -> None:
+    with pytest.raises(ValidationError):
+        RSIMSettings(stock_default=0)
 
 
 def test_cook_not_exceeding_sim_timeout_fails_boot() -> None:

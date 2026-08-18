@@ -133,6 +133,7 @@ def session_factory(db_engine: Engine) -> Iterator[sessionmaker[Session]]:
 def restore_demo_mix_after_suite() -> Iterator[None]:
     """Happy-path tests turn the mix off; put the demo 3%/2% back when pytest exits."""
     yield
-    from tests.sim_admin import restore_demo_mix
+    from tests.sim_admin import restore_demo_mix, restore_restaurant_stock
 
     restore_demo_mix()
+    restore_restaurant_stock()
