@@ -31,6 +31,16 @@ class OrderResponse(BaseModel):
     cohort_id: UUID
 
 
+class RedriveResponse(BaseModel):
+    id: UUID
+    order_id: UUID
+    work_type: str
+    status: str
+    attempt_count: int
+    next_attempt_at: datetime | None
+    idempotency_key: str
+
+
 class TerminalRates(BaseModel):
     delivered: float
     cancelled: float
@@ -70,6 +80,7 @@ class TraceAttempt(BaseModel):
     ended_at: datetime | None
     lease_owner: str
     outcome: str | None
+    idempotency_key: str
 
 
 class OrderTrace(BaseModel):
@@ -100,11 +111,20 @@ class StretchingEtas(BaseModel):
 
 
 class ParkedRow(BaseModel):
+    id: UUID
     order_id: UUID
     work_type: str
     owner: str | None
     reason: str | None
     next_action: str | None
+
+
+class LeasedRow(BaseModel):
+    id: UUID
+    order_id: UUID
+    work_type: str
+    owner: str | None
+    lease_until: datetime
 
 
 class SimHttpLane(BaseModel):
@@ -153,6 +173,7 @@ class SnapshotResponse(BaseModel):
     invalid_transitions: int
     state_vs_last_order_events_mismatches: int
     currently_leased: int
+    currently_leased_items: list[LeasedRow]
     trace: OrderTrace | None
     accept_reject: AcceptReject
     backlog: dict[str, int]

@@ -57,6 +57,7 @@ export type TraceAttempt = {
   ended_at: string | null;
   lease_owner: string;
   outcome: string | null;
+  idempotency_key: string;
 };
 
 export type OrderTrace = {
@@ -87,11 +88,20 @@ export type StretchingEtas = {
 };
 
 export type ParkedRow = {
+  id: string;
   order_id: string;
   work_type: string;
   owner: string | null;
   reason: string | null;
   next_action: string | null;
+};
+
+export type LeasedRow = {
+  id: string;
+  order_id: string;
+  work_type: string;
+  owner: string | null;
+  lease_until: string;
 };
 
 export type SimHttpLane = {
@@ -138,6 +148,7 @@ export type Snapshot = {
   invalid_transitions: number;
   state_vs_last_order_events_mismatches: number;
   currently_leased: number;
+  currently_leased_items: LeasedRow[];
   trace: OrderTrace | null;
   accept_reject: AcceptReject;
   backlog: Record<string, number>;
@@ -153,6 +164,11 @@ export type Snapshot = {
 
 export const POLL_MS = 1000;
 
+function apiPath(path: string): string {
+  const base = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
+  return `${base}${path}`;
+}
+
 export type LoadgenStatus = {
   cohort_id: string;
 };
@@ -166,8 +182,7 @@ export async function fetchLoadgenStatus(signal?: AbortSignal): Promise<LoadgenS
 }
 
 export function snapshotUrl(opts?: { cohortId?: string; orderId?: string }): string {
-  const base = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
-  const path = `${base}/snapshot`;
+  const path = apiPath("/snapshot");
   const params = new URLSearchParams();
   if (opts?.cohortId) {
     params.set("cohort_id", opts.cohortId);
@@ -177,6 +192,26 @@ export function snapshotUrl(opts?: { cohortId?: string; orderId?: string }): str
   }
   const query = params.toString();
   return query ? `${path}?${query}` : path;
+}
+
+export type RedriveResponse = {
+  id: string;
+  order_id: string;
+  work_type: string;
+  status: string;
+  attempt_count: number;
+  next_attempt_at: string | null;
+  idempotency_key: string;
+};
+
+export async function redriveWorkItem(workItemId: string): Promise<RedriveResponse> {
+  const path = `/work-items/${encodeURIComponent(workItemId)}/redrive`;
+  const response = await fetch(apiPath(path), { method: "POST" });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`POST ${path} ${response.status}: ${body.slice(0, 200)}`);
+  }
+  return (await response.json()) as RedriveResponse;
 }
 
 export async function fetchSnapshot(opts?: {

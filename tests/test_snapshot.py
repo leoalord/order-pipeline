@@ -22,6 +22,7 @@ from order_pipeline.intake import confirm_idempotency_key, place_order
 from order_pipeline.lifecycle import CAUSE_INVALID
 from order_pipeline.models import Attempt, Order, OrderEvent, WorkItem
 from order_pipeline.worker.dispatch import dispatch_idempotency_key
+from tests.conftest import hold_unclaimable
 
 TTL_HOURS = 48
 
@@ -121,6 +122,7 @@ def test_snapshot_fields_cohort_filter_and_trace_null_attempts(
             ),
             order_id=order_id,
         )
+        hold_unclaimable(session, order_id, outsider_id)
 
     assert snap.cohort_id == cohort
     assert snap.conservation.accepted == 1
@@ -132,6 +134,7 @@ def test_snapshot_fields_cohort_filter_and_trace_null_attempts(
     assert snap.invalid_transitions == 0
     assert snap.state_vs_last_order_events_mismatches == 0
     assert snap.currently_leased == 0
+    assert snap.currently_leased_items == []
     assert tuple(snap.stages) == STAGE_NAMES
     assert snap.stages["confirmed"] == 1
     assert snap.backlog["confirm"] == 1
@@ -168,6 +171,11 @@ def test_snapshot_fields_cohort_filter_and_trace_null_attempts(
     assert all(row.started_at is not None for row in snap.trace.attempts)
     assert snap.trace.attempts[0].ended_at is None
     assert snap.trace.attempts[1].ended_at is not None
+    assert snap.trace.attempts[0].lease_owner == "worker-a"
+    assert snap.trace.attempts[1].lease_owner == "worker-b"
+    assert snap.trace.attempts[0].work_item_id == snap.trace.attempts[1].work_item_id
+    assert snap.trace.attempts[0].idempotency_key == snap.trace.attempts[1].idempotency_key
+    assert snap.trace.attempts[0].idempotency_key == confirm_idempotency_key(order_id)
 
 
 def test_snapshot_splits_sim_errors_and_reports_honest_fleet_slot_totals(
@@ -324,6 +332,7 @@ def test_retry_metrics_exclude_successful_polling_and_count_fault_reexecution(
 
         retries = retry_attempt_ids(rows)
         snap = build_snapshot(session, cohort_id=cohort, now=now, ledger_counts=())
+        hold_unclaimable(session, order.id)
 
     assert retries == {rows[3].id, rows[5].id}
     assert snap.duplicate_attempts == 2
@@ -345,6 +354,7 @@ def test_snapshot_stages_split_queued_confirmed_from_cooking_being_prepared(
         cooking.version += 1
         session.flush()
         snap = build_snapshot(session, cohort_id=cohort, now=now, ledger_counts=())
+        hold_unclaimable(session, queued.id, cooking.id)
     assert snap.stages["confirmed"] == 1
     assert snap.stages["being prepared"] == 1
     assert snap.stages["placed"] == 0
@@ -441,11 +451,20 @@ def test_startup_scan_and_mismatch_and_leased_and_parked_outside(
             )
             assert snap.startup_scan == 1
             assert snap.currently_leased == 1
+            assert len(snap.currently_leased_items) == 1
+            leased_row = snap.currently_leased_items[0]
+            assert leased_row.id == live.id
+            assert leased_row.order_id == leased.id
+            assert leased_row.work_type == live.work_type
+            assert leased_row.owner == "worker-1"
+            assert leased_row.lease_until == live.lease_until
             assert snap.conservation.parked == 1
             assert snap.conservation.residual == 1
             assert snap.state_vs_last_order_events_mismatches >= 1
             assert snap.invalid_transitions == 0
             assert len(snap.parked_list) == 1
+            assert snap.parked_list[0].id == parked.id
+            assert snap.parked_list[0].order_id == parked.order_id
             assert snap.parked_list[0].owner == "worker-1"
             assert snap.parked_list[0].reason == "retry_budget_exhausted"
             assert snap.parked_list[0].next_action == "redrive"
@@ -473,6 +492,7 @@ def test_invalid_transition_events_are_counted(session_factory: sessionmaker[Ses
         )
         session.flush()
         snap = build_snapshot(session, cohort_id=cohort, now=now, ledger_counts=())
+        hold_unclaimable(session, order.id)
     assert snap.invalid_transitions == 1
 
 
@@ -488,7 +508,7 @@ def test_snapshot_duplicate_effects_none_when_ledgers_unavailable(
     cohort = uuid.uuid4()
     now = datetime.now(UTC)
     with session_factory.begin() as session:
-        _place(session, cohort_id=cohort)
+        order = _place(session, cohort_id=cohort)
         snap = build_snapshot(
             session,
             cohort_id=cohort,
@@ -497,6 +517,7 @@ def test_snapshot_duplicate_effects_none_when_ledgers_unavailable(
             ledgers_ok=False,
             door_429s=3,
         )
+        hold_unclaimable(session, order.id)
     assert snap.duplicate_effects is None
     assert snap.conservation.residual == 0
     assert snap.http_429s.door == 3

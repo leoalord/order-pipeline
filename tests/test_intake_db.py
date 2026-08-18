@@ -33,6 +33,7 @@ from order_pipeline.models import (
     OrderEvent,
     WorkItem,
 )
+from tests.conftest import hold_unclaimable
 
 TTL_HOURS = 48
 
@@ -50,6 +51,7 @@ def _accept(factory: sessionmaker[Session], place_key: str, items: list[str]) ->
             cohort_id=None,
             ttl_hours=TTL_HOURS,
         )
+        hold_unclaimable(session, order.id)
         return order.id
 
 
@@ -149,6 +151,7 @@ def test_expired_key_mints_a_new_order_and_reuses_the_row(
             ttl_hours=TTL_HOURS,
             now=past_ttl,
         )
+        hold_unclaimable(session, second.id)
         second_id = second.id
 
     assert second_id != first_id

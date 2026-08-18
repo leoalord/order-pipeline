@@ -17,6 +17,7 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       "/snapshot": { target: api, changeOrigin: true },
+      "/work-items": { target: api, changeOrigin: true },
       "/loadgen": {
         target: loadgen,
         changeOrigin: true,

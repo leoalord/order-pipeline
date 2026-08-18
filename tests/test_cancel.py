@@ -111,6 +111,32 @@ def test_cancel_from_confirmed_applies_event(session_factory: sessionmaker[Sessi
         assert _invalid_evidence(session, order_id) == []
 
 
+def test_cancel_from_confirmed_cancels_parked_work(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory.begin() as session:
+        order = _place_in_session(session)
+        _set_state(session, order, "confirmed")
+        item = session.scalars(select(WorkItem).where(WorkItem.order_id == order.id)).one()
+        item.status = "parked"
+        item.park_owner = "worker-old"
+        item.park_reason = "poll_budget_exhausted"
+        item.park_next_action = "redrive"
+        order_id = order.id
+
+        result = cancel_order(session, order_id)
+        assert result.outcome is CancelOutcome.APPLIED
+
+    with session_factory() as session:
+        item = session.scalars(select(WorkItem).where(WorkItem.order_id == order_id)).one()
+        assert item.status == "cancelled"
+        assert item.lease_owner is None
+        assert item.lease_until is None
+        assert item.park_owner is None
+        assert item.park_reason is None
+        assert item.park_next_action is None
+
+
 def test_cancel_after_being_prepared_is_rejected_with_evidence(
     session_factory: sessionmaker[Session],
 ) -> None:

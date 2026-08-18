@@ -36,14 +36,25 @@ class CancelResult:
 def _cancel_open_work(session: Session, order_id: UUID) -> None:
     """Stop quiet pre-pivot cancel from leaving claimable confirm/poll work.
 
-    Pending work is cancelled and unleased. Leased work is marked cancelled but
-    keeps lease_owner so the in-flight worker can finalize as supersession
-    (0-row UPDATE, not invalid). status=cancelled already blocks reclaim.
+    Pending and parked work are cancelled and unleased. Leased work is marked
+    cancelled but keeps lease_owner so the in-flight worker can finalize as
+    supersession (0-row UPDATE, not invalid). status=cancelled already blocks
+    reclaim and prevents a later operator redrive from reviving terminal work.
     """
     session.execute(
         update(WorkItem)
-        .where(WorkItem.order_id == order_id, WorkItem.status == "pending")
-        .values(status="cancelled", lease_owner=None, lease_until=None)
+        .where(
+            WorkItem.order_id == order_id,
+            WorkItem.status.in_(("pending", "parked")),
+        )
+        .values(
+            status="cancelled",
+            lease_owner=None,
+            lease_until=None,
+            park_owner=None,
+            park_reason=None,
+            park_next_action=None,
+        )
     )
     session.execute(
         update(WorkItem)

@@ -4,6 +4,7 @@ import {
   fetchLoadgenStatus,
   fetchSnapshot,
   POLL_MS,
+  redriveWorkItem,
   STAGE_LABELS,
   STAGE_SEAMS,
   type Snapshot,
@@ -23,6 +24,9 @@ export function HomePage() {
   const [error, setError] = useState<string | null>(null);
   const [orderId, setOrderId] = useState("");
   const [cohortId, setCohortId] = useState<string | null>(null);
+  const [redriving, setRedriving] = useState<string | null>(null);
+  const [redriveStatus, setRedriveStatus] = useState<string | null>(null);
+  const [refreshEpoch, setRefreshEpoch] = useState(0);
   const cohortIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -82,7 +86,23 @@ export function HomePage() {
         window.clearTimeout(timer);
       }
     };
-  }, [orderId]);
+  }, [orderId, refreshEpoch]);
+
+  const redrive = async (workItemId: string) => {
+    setRedriving(workItemId);
+    setRedriveStatus(null);
+    try {
+      const result = await redriveWorkItem(workItemId);
+      setRedriveStatus(
+        `Redrove ${result.work_type} for order ${result.order_id} with key ${result.idempotency_key}.`,
+      );
+      setRefreshEpoch((value) => value + 1);
+    } catch (err) {
+      setRedriveStatus(err instanceof Error ? err.message : "Redrive failed");
+    } finally {
+      setRedriving(null);
+    }
+  };
 
   const stages = snapshot?.stages;
   const rates = snapshot?.terminal_rates_per_min;
@@ -97,6 +117,7 @@ export function HomePage() {
   const simHttp = snapshot?.sim_http;
   const outboundSlots = snapshot?.outbound_slots;
   const parked = snapshot?.parked_list ?? [];
+  const leased = snapshot?.currently_leased_items ?? [];
   const noProgress = snapshot?.no_progress_beyond_threshold;
 
   return (
@@ -433,9 +454,20 @@ export function HomePage() {
             <h3>currently-leased</h3>
             <p className="metric">{fmt(snapshot?.currently_leased)}</p>
             <p className="hint">
-              Work items in the middle of an outbound call. 0 means the worker
-              is idle or down.
+              Work items in the middle of an outbound call. Record an order and
+              owner here before the scenario-3 Docker kill. 0 means the workers
+              are idle or down.
             </p>
+            {leased.length > 0 ? (
+              <ul className="leased-list">
+                {leased.map((row) => (
+                  <li key={row.id}>
+                    <code>{row.order_id}</code> · {row.work_type} · owner{" "}
+                    <code>{row.owner ?? "—"}</code>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
           </article>
           <article className="card">
             <h3>state-vs-last-event mismatch</h3>
@@ -458,9 +490,11 @@ export function HomePage() {
         <article className="card parked">
           <h3>parked list</h3>
           <p className="hint">
-            Read-only. Owner, reason, and next action. Parked work is stalled,
-            not lost, and not a lifecycle stage.
+            Owner, reason, and next action. Clear the dependency fault, then
+            Redrive the same stored job. Parked work is stalled, not lost, and
+            not a lifecycle stage.
           </p>
+          {redriveStatus ? <p className="hint">{redriveStatus}</p> : null}
           {parked.length === 0 ? (
             <p className="hint">None in this cohort.</p>
           ) : (
@@ -473,16 +507,27 @@ export function HomePage() {
                     <th>owner</th>
                     <th>reason</th>
                     <th>next action</th>
+                    <th>operator</th>
                   </tr>
                 </thead>
                 <tbody>
                   {parked.map((row) => (
-                    <tr key={`${row.order_id}-${row.work_type}`}>
+                    <tr key={row.id}>
                       <td>{row.order_id}</td>
                       <td>{row.work_type}</td>
                       <td>{row.owner ?? "—"}</td>
                       <td>{row.reason ?? "—"}</td>
                       <td>{row.next_action ?? "—"}</td>
+                      <td>
+                        <button
+                          className="redrive-button"
+                          type="button"
+                          disabled={redriving === row.id}
+                          onClick={() => void redrive(row.id)}
+                        >
+                          {redriving === row.id ? "Redriving…" : "Redrive"}
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -523,7 +568,8 @@ export function HomePage() {
               <ol>
                 {trace.attempts.map((attempt) => (
                   <li key={attempt.id}>
-                    {attempt.work_type} {attempt.outcome ?? "NULL"} {attempt.started_at}
+                    {attempt.work_type} {attempt.outcome ?? "NULL"} · {attempt.lease_owner} ·{" "}
+                    {attempt.idempotency_key} · {attempt.work_item_id} {attempt.started_at}
                     {attempt.ended_at ? ` → ${attempt.ended_at}` : ""}
                   </li>
                 ))}

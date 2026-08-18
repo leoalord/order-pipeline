@@ -160,6 +160,25 @@ export function ControlPage() {
         </div>
       </section>
 
+      <section className="pane">
+        <h2>Crash assist</h2>
+        <p className="pane-intro">
+          Courier blackout is the 30s park fixture. Stop a worker only from the
+          Docker terminal while Watch reports an in-flight lease.
+        </p>
+        <div className="control-row">
+          <button
+            type="button"
+            disabled={busy !== null}
+            onClick={() =>
+              void run("/csim/admin/faults", { mode: "blackout", seconds: 30 })
+            }
+          >
+            Courier blackout (30s)
+          </button>
+        </div>
+      </section>
+
       <p className="hint last-post">
         {busy ? `posting ${busy}…` : null}
         {!busy && last

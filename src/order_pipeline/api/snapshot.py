@@ -16,6 +16,7 @@ from order_pipeline.api.schemas import (
     Conservation,
     E2eLatency,
     Http429s,
+    LeasedRow,
     NoProgress,
     OldestOpen,
     OrderTrace,
@@ -317,18 +318,28 @@ def build_snapshot(
     duplicate_attempts = len(retry_ids)
 
     at = _aware(now)
-    currently_leased = 0
+    currently_leased_items: list[LeasedRow] = []
     restaurant_slots_used = 0
     courier_slots_used = 0
     for item in work_items:
         if item.status != "leased" or item.lease_until is None:
             continue
         if _aware(item.lease_until) > at:
-            currently_leased += 1
+            currently_leased_items.append(
+                LeasedRow(
+                    id=item.id,
+                    order_id=item.order_id,
+                    work_type=item.work_type,
+                    owner=item.lease_owner,
+                    lease_until=item.lease_until,
+                )
+            )
             if item.work_type in KITCHEN_WORK:
                 restaurant_slots_used += 1
             elif item.work_type in COURIER_WORK:
                 courier_slots_used += 1
+    currently_leased_items.sort(key=lambda row: (row.lease_until, row.id))
+    currently_leased = len(currently_leased_items)
 
     latencies: list[float] = []
     for order in orders:
@@ -416,6 +427,7 @@ def build_snapshot(
 
     parked_list = [
         ParkedRow(
+            id=item.id,
             order_id=item.order_id,
             work_type=item.work_type,
             owner=item.park_owner,
@@ -461,6 +473,7 @@ def build_snapshot(
         invalid_transitions=invalid_transitions,
         state_vs_last_order_events_mismatches=mismatches,
         currently_leased=currently_leased,
+        currently_leased_items=currently_leased_items,
         trace=trace,
         accept_reject=AcceptReject(accepted=accepted, rejected=door_429s),
         backlog=backlog,
@@ -540,6 +553,7 @@ def _trace(
                 ended_at=attempt.ended_at,
                 lease_owner=attempt.lease_owner,
                 outcome=attempt.outcome,
+                idempotency_key=work_by_id[attempt.work_item_id].idempotency_key,
             )
             for attempt in order_attempts
         ],
