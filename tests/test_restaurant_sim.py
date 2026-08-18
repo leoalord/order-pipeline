@@ -367,16 +367,45 @@ def test_void_replays_and_fail_void_500s_until_clear(client: TestClient) -> None
     assert ledger.json()["counts"][accept_key] == 1
     assert ledger.json()["counts"][void_key] == 1
 
+    original_replay = _accept(client, ["chips"], accept_key)
+    assert original_replay.status_code == 200, original_replay.text
+    assert original_replay.json()["ticket_id"] == ticket_id
+
     armed = client.post("/admin/faults", json={"mode": "fail_void"})
     assert armed.status_code == 200, armed.text
     assert armed.json()["mode"] == "fail_void"
     still_accepts = _accept(client, ["taco"], f"unit-void-accept-2-{uuid.uuid4()}")
     assert still_accepts.status_code == 200, still_accepts.text
+
+    cached = client.post(
+        "/void",
+        json={"accept_key": accept_key, "ticket_id": ticket_id},
+        headers={"Idempotency-Key": void_key},
+    )
+    assert cached.status_code == 200, cached.text
+    assert cached.json() == first.json()
+
     failed = client.post(
         "/void",
         json={"accept_key": accept_key},
         headers={"Idempotency-Key": f"unit-void-fail-{uuid.uuid4()}"},
     )
     assert failed.status_code == 500, failed.text
+
+    absent = client.post(
+        "/void",
+        json={"accept_key": f"unit-never-applied-{uuid.uuid4()}"},
+        headers={"Idempotency-Key": f"unit-void-absent-{uuid.uuid4()}"},
+    )
+    assert absent.status_code == 200, absent.text
+    assert absent.json()["voided"] is False
+    assert absent.json()["absent"] is True
+
+    conflict = client.post(
+        "/void",
+        json={"accept_key": "different-confirm"},
+        headers={"Idempotency-Key": void_key},
+    )
+    assert conflict.status_code == 409, conflict.text
     cleared = client.post("/admin/faults", json={"mode": "clear"})
     assert cleared.json()["mode"] == "off"

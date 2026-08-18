@@ -428,3 +428,60 @@ def test_void_budget_uses_settings_not_literal(session_factory: sessionmaker[Ses
         assert voided.status == "completed"
         assert len(orphans) == 1
         assert _invalid_count(session, order_id) == 0
+
+
+def test_permanent_void_failure_records_an_orphan(
+    session_factory: sessionmaker[Session],
+) -> None:
+    now = datetime.now(UTC)
+    with session_factory.begin() as session:
+        order = place_order(
+            session,
+            place_key=f"void-permanent-{uuid.uuid4()}",
+            items=["chips"],
+            cohort_id=uuid.uuid4(),
+            ttl_hours=TTL_HOURS,
+            now=now,
+        )
+        assert cancel_order(session, order.id, now=now).outcome is CancelOutcome.APPLIED
+        void_item = WorkItem(
+            order_id=order.id,
+            work_type="void_ticket",
+            status="pending",
+            idempotency_key=void_idempotency_key(order.id),
+            attempt_count=0,
+            next_attempt_at=now,
+            payload={"accept_key": confirm_idempotency_key(order.id)},
+        )
+        session.add(void_item)
+        session.flush()
+        claimed = _claim(session, void_item.id, now=now, worker_id="worker-void")
+        order_id = order.id
+
+    with session_factory.begin() as session:
+        finalize_claim(
+            session,
+            claimed,
+            HandlerResult(outcome="http_4xx"),
+            settings=_settings(),
+            counters=WorkerCounters(),
+            now=now,
+            rng=random.Random(0),
+        )
+
+    with session_factory() as session:
+        stored = session.get(Order, order_id)
+        voided = _void_work(session, order_id)
+        orphans = session.scalars(
+            select(OrderEvent).where(
+                OrderEvent.order_id == order_id,
+                OrderEvent.cause == CAUSE_ORPHANED,
+            )
+        ).all()
+        assert stored is not None
+        assert voided is not None
+        assert stored.state == "cancelled"
+        assert voided.status == "completed"
+        assert voided.result == {"orphaned_ticket": True}
+        assert len(orphans) == 1
+        assert _invalid_count(session, order_id) == 0

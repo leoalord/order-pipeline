@@ -28,8 +28,15 @@ def _occupancy(
     extra_item_s: float,
 ) -> list[tuple[datetime, datetime]]:
     windows: list[tuple[datetime, datetime]] = []
-    for effect in ledger.list_effects():
-        if effect.payload.get("voided") is True or effect.payload.get("kind") == "void":
+    effects = ledger.list_effects()
+    voided_accept_keys = {
+        accept_key
+        for effect in effects
+        if effect.payload.get("kind") == "void" and effect.payload.get("voided") is True
+        if isinstance((accept_key := effect.payload.get("accept_key")), str)
+    }
+    for effect in effects:
+        if effect.payload.get("kind") == "void" or effect.idempotency_key in voided_accept_keys:
             continue
         if effect.estimated_ready_at <= now:
             continue
@@ -116,7 +123,7 @@ def build_app(
             settings.sim_timeout_s + 0.5 if blackout_hang_s is None else blackout_hang_s
         ),
     )
-    app = create_sim_app(title="Restaurant sim", core=core)
+    app = create_sim_app(title="Restaurant sim", core=core, allow_fail_void=True)
 
     @app.post("/void")
     def post_void(

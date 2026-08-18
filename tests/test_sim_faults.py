@@ -201,7 +201,59 @@ def test_fail_void_500s_void_then_clear(tmp_path: Path, clock: MutableClock) -> 
     assert replay.status_code == 200
     original = core.ledger.get_by_key("k-confirm")
     assert original is not None
-    assert original.payload.get("voided") is True
+    assert original.payload == {"items": ["chips"]}
+
+
+def test_fail_void_keeps_the_accept_mix_live(tmp_path: Path, clock: MutableClock) -> None:
+    rng = ScriptedRng([0.5, 0.1])
+    core = _core(tmp_path, clock, flaky_5xx_pct=100, rng=rng)
+    core.set_fault_command("clear", mix="off")
+    assert core.accept("k-confirm", {"items": ["chips"]}).status_code == 200
+
+    core.set_fault_command("fail_void", mix="on")
+    failed_accept = core.accept("k-other", {"items": ["taco"]})
+    assert failed_accept.action == "five_xx"
+    assert core.ledger.get_by_key("k-other") is None
+    assert core.void("k-void", {"accept_key": "k-confirm"}).status_code == 500
+
+
+def test_void_is_immutable_stripe_style_replay(tmp_path: Path, clock: MutableClock) -> None:
+    core = _core(tmp_path, clock)
+    request = {"accept_key": "k-confirm", "ticket_id": "ticket-ignored"}
+    accepted = core.accept("k-confirm", {"items": ["chips"]})
+    assert accepted.status_code == 200
+
+    first = core.void("k-void", request)
+    assert first.status_code == 200
+    assert first.body is not None and first.body["voided"] is True
+    assert core.ledger.counts_by_key() == {"k-confirm": 1, "k-void": 1}
+
+    core.set_fault_command("fail_void")
+    replay = core.void("k-void", request)
+    assert replay.status_code == 200
+    assert replay.body == first.body
+    assert core.void("k-void", {"accept_key": "other"}).status_code == 409
+
+    original_replay = core.accept("k-confirm", {"items": ["chips"]})
+    assert original_replay.status_code == 200
+    original = core.ledger.get_by_key("k-confirm")
+    assert original is not None
+    assert original.payload == {"items": ["chips"]}
+
+
+def test_fail_void_does_not_orphan_an_absent_ticket(tmp_path: Path, clock: MutableClock) -> None:
+    core = _core(tmp_path, clock)
+    core.set_fault_command("fail_void")
+    request = {"accept_key": "never-applied"}
+
+    first = core.void("k-void-absent", request)
+    replay = core.void("k-void-absent", request)
+    assert first.status_code == 200
+    assert first.body is not None
+    assert first.body["voided"] is False
+    assert first.body["absent"] is True
+    assert replay.body == first.body
+    assert core.ledger.counts_by_key() == {"k-void-absent": 1}
 
 
 def test_targeted_rule_aborts_for_existing_effect_and_clear_removes_rules(

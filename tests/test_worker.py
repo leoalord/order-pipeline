@@ -389,8 +389,10 @@ def test_cancelled_zero_rows_is_supersession_not_invalid(
         assert voids[0].idempotency_key == void_idempotency_key(order_id)
 
 
-def test_cancel_then_leased_retry_keeps_work_cancelled(
+@pytest.mark.parametrize("outcome", ["http_5xx", "dropped", "timeout"])
+def test_cancel_then_failed_confirm_enqueues_void_and_stays_cancelled(
     session_factory: sessionmaker[Session],
+    outcome: str,
 ) -> None:
     now = datetime.now(UTC)
     with session_factory.begin() as session:
@@ -406,22 +408,33 @@ def test_cancel_then_leased_retry_keeps_work_cancelled(
         finalize_claim(
             session,
             claimed,
-            HandlerResult(outcome="http_5xx"),
+            HandlerResult(outcome=outcome),
             settings=_settings(),
             counters=WorkerCounters(),
             now=now,
             rng=random.Random(0),
         )
+        hold_unclaimable(session, order_id)
 
     with session_factory() as session:
         order = session.get(Order, order_id)
         item = session.get(WorkItem, item_id)
+        voids = session.scalars(
+            select(WorkItem).where(
+                WorkItem.order_id == order_id,
+                WorkItem.work_type == "void_ticket",
+            )
+        ).all()
         assert order is not None
         assert item is not None
         assert order.state == "cancelled"
         assert item.status == "cancelled"
         assert item.lease_owner is None
         assert item.lease_until is None
+        assert len(voids) == 1
+        assert voids[0].status == "pending"
+        assert voids[0].idempotency_key == void_idempotency_key(order_id)
+        assert voids[0].payload == {"accept_key": claimed.idempotency_key}
         later = claim_next(
             session,
             now=now + timedelta(seconds=1),

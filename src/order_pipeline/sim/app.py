@@ -22,7 +22,7 @@ IdempotencyKeyHeader = Annotated[
 ]
 
 
-def mount_sim_routes(app: FastAPI, core: SimCore) -> None:
+def mount_sim_routes(app: FastAPI, core: SimCore, *, allow_fail_void: bool) -> None:
     def blackout_drop() -> DroppedResponse | None:
         if not core.blackout_active():
             return None
@@ -81,10 +81,10 @@ def mount_sim_routes(app: FastAPI, core: SimCore) -> None:
             raise HTTPException(status_code=404, detail="key not found")
         return JSONResponse(ticket)
 
-    app.include_router(admin_router(core))
+    app.include_router(admin_router(core, allow_fail_void=allow_fail_void))
 
 
-def create_sim_app(*, title: str, core: SimCore) -> FastAPI:
+def create_sim_app(*, title: str, core: SimCore, allow_fail_void: bool = False) -> FastAPI:
     app = FastAPI(title=title)
-    mount_sim_routes(app, core)
+    mount_sim_routes(app, core, allow_fail_void=allow_fail_void)
     return app

@@ -57,7 +57,7 @@ class ConfirmUnavailablePost(BaseModel):
         return targets
 
 
-def admin_router(core: SimCore) -> APIRouter:
+def admin_router(core: SimCore, *, allow_fail_void: bool) -> APIRouter:
     router = APIRouter(prefix="/admin")
 
     @router.get("/faults")
@@ -66,6 +66,8 @@ def admin_router(core: SimCore) -> APIRouter:
 
     @router.post("/faults")
     def post_faults(body: FaultsPost) -> dict[str, Any]:
+        if body.mode == "fail_void" and not allow_fail_void:
+            raise HTTPException(status_code=422, detail="fail_void is restaurant-only")
         try:
             return core.set_fault_command(
                 body.mode,

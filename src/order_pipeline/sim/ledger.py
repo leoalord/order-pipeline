@@ -74,26 +74,6 @@ class EffectLedger:
             ).fetchone()
         return self._row_to_effect(row) if row is not None else None
 
-    def mark_voided(self, idempotency_key: str) -> bool:
-        """Set payload.voided on an existing accept so occupancy ignores it."""
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT payload_json FROM effects WHERE idempotency_key = ?",
-                (idempotency_key,),
-            ).fetchone()
-            if row is None:
-                return False
-            payload = json.loads(str(row["payload_json"]))
-            if not isinstance(payload, dict):
-                payload = {}
-            payload["voided"] = True
-            self._conn.execute(
-                "UPDATE effects SET payload_json = ? WHERE idempotency_key = ?",
-                (json.dumps(payload, separators=(",", ":")), idempotency_key),
-            )
-            self._conn.commit()
-        return True
-
     def insert(self, effect: Effect) -> bool:
         """Insert the effect. Returns False if the key already exists."""
         payload_json = json.dumps(effect.payload, separators=(",", ":"))

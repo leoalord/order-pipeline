@@ -110,10 +110,11 @@ def apply_policy(
 
     if result.outcome in PERMANENT_OUTCOMES:
         if claimed.work_type == VOID_TICKET_WORK_TYPE:
+            payload = result.result_payload if isinstance(result.result_payload, dict) else {}
             return HandlerResult(
                 outcome=result.outcome,
                 disposition=WorkDisposition.COMPLETE,
-                result_payload=result.result_payload,
+                result_payload={**payload, "orphaned_ticket": True},
             )
         return HandlerResult(
             outcome=result.outcome,
@@ -271,6 +272,10 @@ def _enqueue_void_ticket(
     ).one_or_none()
     if existing is not None:
         return
+    payload = dict(policy.result_payload) if isinstance(policy.result_payload, dict) else {}
+    # Even an unknown/failed confirm has a stable stored key. The restaurant
+    # resolves it to the applied ticket or completes an idempotent no-op.
+    payload["accept_key"] = claimed.idempotency_key
     session.add(
         WorkItem(
             order_id=claimed.order_id,
@@ -279,7 +284,7 @@ def _enqueue_void_ticket(
             idempotency_key=key,
             attempt_count=0,
             next_attempt_at=now,
-            payload=policy.result_payload,
+            payload=payload,
         )
     )
 
@@ -354,12 +359,7 @@ def finalize_claim(
     ):
         _release_lease(item)
         item.status = "cancelled"
-        if (
-            claimed.work_type in CONFIRM_WORK_TYPES
-            and order.state == "cancelled"
-            and policy.transition is not None
-            and not applied
-        ):
+        if claimed.work_type in CONFIRM_WORK_TYPES and order.state == "cancelled":
             _enqueue_void_ticket(session, claimed, policy, now)
         return
 
