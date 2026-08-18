@@ -271,11 +271,12 @@ def finalize_claim(
     # Cancel keeps lease_owner on in-flight work so this finalize can settle.
     # Re-read the order after the guarded UPDATE: a leased RETRY/PARK has no
     # transition, so the cancelled check must not live only inside `if not applied`.
-    # Do not SELECT FOR UPDATE the work item here — that would lock work_items
-    # before the order row and invert cancel/redrive (order, then work item).
+    # Lock the order (same first lock as cancel/redrive). Do not lock the work
+    # item here — the earlier unlocked get is only a lease-owner check, and
+    # locking it first would invert order → work_item.
     # Skip only when the order is already terminal for a reason we did not just
     # apply (cancel). A 4xx/deadline fail that we just wrote must still FAIL_ORDER.
-    order = session.get(Order, claimed.order_id)
+    order = session.get(Order, claimed.order_id, with_for_update=True)
     just_applied_terminal = (
         applied
         and policy.transition is not None

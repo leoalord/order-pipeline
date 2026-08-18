@@ -209,7 +209,7 @@ Scenario 3 runs in two beats, in order. First, with steady arrivals still runnin
 ```bash
 curl -sS -X POST http://localhost:8081/admin/faults \
   -H 'Content-Type: application/json' \
-  -d '{"mode":"blackout","seconds":30}'
+  -d '{"mode":"blackout","seconds":60}'
 # Read Watch's currently-leased card, then:
 docker kill <full-worker-id-whose-prefix-matches-the-visible-owner>
 curl -sS -X POST http://localhost:8081/admin/faults \

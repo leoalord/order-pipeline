@@ -255,9 +255,9 @@ def test_confirm_success_returning_at_deadline_still_fails_explicitly(
         assert item.idempotency_key == stored_key
         events = list(
             session.scalars(
-                select(OrderEvent).where(
-                    OrderEvent.order_id == order_id, OrderEvent.applied.is_(True)
-                )
+                select(OrderEvent)
+                .where(OrderEvent.order_id == order_id, OrderEvent.applied.is_(True))
+                .order_by(OrderEvent.timestamp, OrderEvent.id)
             )
         )
         assert [event.cause for event in events] == ["place", CAUSE_CONFIRM_DEADLINE]

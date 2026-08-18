@@ -6,7 +6,7 @@ import subprocess
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -130,18 +130,21 @@ def _wait_parked_dispatch(
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         body = _snapshot(cohort_id=cohort_id, order_id=order_id)
+        parked_list = body["parked_list"]
+        assert isinstance(parked_list, list)
         parked_row = next(
             (
                 row
-                for row in body["parked_list"]
-                if row["order_id"] == str(order_id)
-                and row["work_type"] == "dispatch"
-                and (work_item_id is None or row["id"] == work_item_id)
+                for row in parked_list
+                if isinstance(row, dict)
+                and row.get("order_id") == str(order_id)
+                and row.get("work_type") == "dispatch"
+                and (work_item_id is None or row.get("id") == work_item_id)
             ),
             None,
         )
         if parked_row is not None:
-            return parked_row
+            return cast(dict[str, Any], parked_row)
         time.sleep(POLL_S)
     pytest.fail(f"dispatch for {order_id} did not park within {timeout_s}s")
 

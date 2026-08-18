@@ -58,6 +58,19 @@ def hold_unclaimable(session: Session, *order_ids: UUID) -> None:
             item.next_attempt_at = UNCLAIMABLE_AT
 
 
+def hold_claimable_items(session: Session, *item_ids: UUID) -> None:
+    if not item_ids:
+        return
+    for item in session.scalars(select(WorkItem).where(WorkItem.id.in_(item_ids))):
+        if item.status in {"pending", "leased"}:
+            item.next_attempt_at = UNCLAIMABLE_AT
+
+
+def _work_item_ids(factory: sessionmaker[Session]) -> set[UUID]:
+    with factory() as session:
+        return set(session.scalars(select(WorkItem.id)).all())
+
+
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     idle_sim = [item for item in items if item.nodeid in IDLE_SIM_COMPOSE_TESTS]
     regular = [
@@ -86,10 +99,34 @@ def db_engine() -> Iterator[Engine]:
     engine.dispose()
 
 
+_EXISTING_CLAIMABLE_QUARANTINED = False
+
+
 @pytest.fixture
-def session_factory(db_engine: Engine) -> sessionmaker[Session]:
-    """Sessions behave like the API's: committed rows stay readable on the instance."""
-    return sessionmaker(bind=db_engine, expire_on_commit=False)
+def session_factory(db_engine: Engine) -> Iterator[sessionmaker[Session]]:
+    """Sessions behave like the API's: committed rows stay readable on the instance.
+
+    After each test, newly created leftover pending/leased rows are deferred so
+    live compose workers cannot execute fixture work. The first use also
+    quarantines claimable leftovers already in the shared database.
+    """
+    global _EXISTING_CLAIMABLE_QUARANTINED
+    factory = sessionmaker(bind=db_engine, expire_on_commit=False)
+    if not _EXISTING_CLAIMABLE_QUARANTINED:
+        with factory.begin() as session:
+            existing = list(
+                session.scalars(
+                    select(WorkItem.id).where(WorkItem.status.in_(("pending", "leased")))
+                )
+            )
+            hold_claimable_items(session, *existing)
+        _EXISTING_CLAIMABLE_QUARANTINED = True
+    before = _work_item_ids(factory)
+    yield factory
+    created = _work_item_ids(factory) - before
+    if created:
+        with factory.begin() as session:
+            hold_claimable_items(session, *created)
 
 
 @pytest.fixture(scope="session", autouse=True)
