@@ -1,0 +1,20 @@
+name: Publish Hugging Face Space
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Hugging Face CLI
+        run: pip install "huggingface_hub[cli]"
+      - name: Upload Space image tree
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: ./scripts/publish_space.sh LeoWalker/order-pipeline
