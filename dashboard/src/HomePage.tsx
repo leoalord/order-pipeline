@@ -629,6 +629,15 @@ export function HomePage() {
     }
   };
 
+  // Unavailable evidence is not a passing proof. A green check inside a red
+  // card is the contradiction this avoids.
+  const correctnessTone: "healthy" | "fault" | "unknown" =
+    !snapshot || snapshot.duplicate_effects === null
+      ? "unknown"
+      : (conservation?.residual ?? 0) === 0 && snapshot.duplicate_effects === 0
+        ? "healthy"
+        : "fault";
+
   const scenario = SCENARIO_COPY[activeScenario];
   // A global blackout fails every confirm, so the standing copy about ordinary
   // orders continuing would contradict the board while it is armed.
@@ -912,29 +921,28 @@ export function HomePage() {
 
           <button
             type="button"
-            className={
-              (conservation?.residual ?? 0) === 0 &&
-              snapshot?.duplicate_effects === 0
-                ? "correctness-proof healthy"
-                : "correctness-proof fault"
-            }
+            className={`correctness-proof ${correctnessTone}`}
             onClick={(event) =>
               openDetail({ kind: "correctness" }, event.currentTarget)
             }
           >
             <span className="proof-icon" aria-hidden="true">
-              {(conservation?.residual ?? 0) === 0 ? "✓" : "!"}
+              {{ healthy: "✓", fault: "!", unknown: "?" }[correctnessTone]}
             </span>
             <span>
               <small>Correctness proof</small>
               <strong>
-                {snapshot
-                  ? `${conservation?.accepted ?? 0} orders reconciled`
-                  : "Connecting…"}
+                {!snapshot
+                  ? "Connecting…"
+                  : correctnessTone === "unknown"
+                    ? `${conservation?.accepted ?? 0} orders · effects unavailable`
+                    : `${conservation?.accepted ?? 0} orders reconciled`}
               </strong>
               <b>
                 Residual {fmt(conservation?.residual)} · duplicate effects{" "}
-                {fmt(snapshot?.duplicate_effects)}
+                {snapshot?.duplicate_effects === null
+                  ? "unavailable"
+                  : fmt(snapshot?.duplicate_effects)}
               </b>
             </span>
             <i aria-hidden="true">›</i>

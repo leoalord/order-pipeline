@@ -895,6 +895,17 @@ button:disabled {
   background: linear-gradient(135deg, var(--red-soft), var(--surface-soft));
 }
 
+.correctness-proof.unknown {
+  border-color: var(--line-strong);
+  background: var(--surface-soft);
+}
+
+.unknown .proof-icon {
+  border-radius: 8px;
+  border-color: var(--muted-strong);
+  color: var(--muted-strong);
+}
+
 .proof-icon {
   width: 32px;
   height: 32px;
