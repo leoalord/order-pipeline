@@ -91,7 +91,10 @@ class OpenLoopDriver:
         self.client = client
         self.rng = rng or random.Random()
         self.cohort_id: UUID = DEFAULT_COHORT_ID
-        self.h: float | None = None
+        self.h: float | None = settings.default_h
+        # The boot H is a conservative host-independent guess, not a measurement.
+        # Callers that size pressure off H need to know which one they have.
+        self.h_source: str = "fallback"
         self.rate_rps = 0.0
         self.placed = 0
         self.rejected_429 = 0
@@ -107,6 +110,8 @@ class OpenLoopDriver:
         return {
             "cohort_id": str(self.cohort_id),
             "h": self.h,
+            "h_source": self.h_source,
+            "calibrated": self.h_source == "calibrated" and (self.h or 0.0) > 0,
             "rate_rps": self.rate_rps,
             "placed": self.placed,
             "rejected_429": self.rejected_429,
@@ -331,6 +336,7 @@ class OpenLoopDriver:
             rps = round(rps * grow, 4)
         await self.stop_and_drain()
         self.h = h
+        self.h_source = "calibrated"
         # Snapshot counters are cohort-cumulative. Restrict this decision to
         # brake events observed during this calibration so an earlier run
         # cannot poison the result after the operator raises the door cap.

@@ -1,6 +1,6 @@
 /** Frozen GET /snapshot field names. Never rename. Cards on `/` bind to these. */
 
-/** Assignment names. confirmed = kitchen queued; being prepared = cooking (on a pan). */
+/** Assignment lifecycle names. Stored API values remain unchanged. */
 export const STAGE_LABELS = [
   "placed",
   "confirmed",
@@ -12,10 +12,12 @@ export const STAGE_LABELS = [
 
 export type StageLabel = (typeof STAGE_LABELS)[number];
 
-/** Stable label seam on the existing `/` stage cards. No pipeline pane here. */
+/** Short presentation descriptions without simulator-specific equipment. */
 export const STAGE_SEAMS: Partial<Record<StageLabel, string>> = {
-  confirmed: "queued — waiting for a pan",
-  "being prepared": "cooking — on a pan",
+  confirmed: "accepted — queued for preparation",
+  "being prepared": "preparation underway",
+  ready: "waiting for courier assignment or pickup",
+  "out for delivery": "picked up — courier en route",
 };
 
 export type TerminalRates = {
@@ -64,6 +66,13 @@ export type OrderTrace = {
   order_id: string;
   order_events: TraceEvent[];
   attempts: TraceAttempt[];
+};
+
+export type OrderSummary = {
+  id: string;
+  state: string;
+  accepted_at: string;
+  items: string[];
 };
 
 export type AcceptReject = {
@@ -149,6 +158,7 @@ export type Snapshot = {
   state_vs_last_order_events_mismatches: number;
   currently_leased: number;
   currently_leased_items: LeasedRow[];
+  orders: OrderSummary[];
   trace: OrderTrace | null;
   accept_reject: AcceptReject;
   backlog: Record<string, number>;
@@ -172,6 +182,26 @@ function apiPath(path: string): string {
 
 export type LoadgenStatus = {
   cohort_id: string;
+  h: number | null;
+  /** "fallback" until a calibrate run measures this host. */
+  h_source?: string;
+  calibrated?: boolean;
+  rate_rps: number;
+  placed: number;
+  rejected_429: number;
+  running: boolean;
+};
+
+export type SimFaultStatus = {
+  mode: string;
+  mix: string;
+  blackout_remaining_s: number;
+  confirm_unavailable: string[];
+};
+
+export type SimFaults = {
+  restaurant: SimFaultStatus;
+  courier: SimFaultStatus;
 };
 
 export async function fetchLoadgenStatus(signal?: AbortSignal): Promise<LoadgenStatus> {
@@ -180,6 +210,23 @@ export async function fetchLoadgenStatus(signal?: AbortSignal): Promise<LoadgenS
     throw new Error(`GET /loadgen/status ${response.status}`);
   }
   return (await response.json()) as LoadgenStatus;
+}
+
+export async function fetchSimFaults(signal?: AbortSignal): Promise<SimFaults> {
+  const [restaurant, courier] = await Promise.all([
+    fetch("/rsim/admin/faults", { signal }),
+    fetch("/csim/admin/faults", { signal }),
+  ]);
+  if (!restaurant.ok) {
+    throw new Error(`GET /rsim/admin/faults ${restaurant.status}`);
+  }
+  if (!courier.ok) {
+    throw new Error(`GET /csim/admin/faults ${courier.status}`);
+  }
+  return {
+    restaurant: (await restaurant.json()) as SimFaultStatus,
+    courier: (await courier.json()) as SimFaultStatus,
+  };
 }
 
 export function snapshotUrl(opts?: { cohortId?: string; orderId?: string }): string {

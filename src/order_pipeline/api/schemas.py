@@ -89,6 +89,15 @@ class OrderTrace(BaseModel):
     attempts: list[TraceAttempt]
 
 
+class OrderSummary(BaseModel):
+    """Small additive projection used to place real orders on the demo lifecycle."""
+
+    id: UUID
+    state: str
+    accepted_at: datetime
+    items: list[str]
+
+
 class AcceptReject(BaseModel):
     accepted: int
     rejected: int
@@ -174,6 +183,7 @@ class SnapshotResponse(BaseModel):
     state_vs_last_order_events_mismatches: int
     currently_leased: int
     currently_leased_items: list[LeasedRow]
+    orders: list[OrderSummary]
     trace: OrderTrace | None
     accept_reject: AcceptReject
     backlog: dict[str, int]

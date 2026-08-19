@@ -150,6 +150,8 @@ def _seed_ride(
     worker_id: str,
     attempt_count: int = 0,
     accept_key: str | None = None,
+    order_state: str = "out_for_delivery",
+    service_started_at: datetime | None = None,
 ) -> tuple[uuid.UUID, uuid.UUID, str, ClaimedWork]:
     with factory.begin() as session:
         order = place_order(
@@ -160,7 +162,7 @@ def _seed_ride(
             ttl_hours=TTL_HOURS,
             now=now,
         )
-        order.state = "out_for_delivery"
+        order.state = order_state
         order.version += 1
         confirm = session.scalars(select(WorkItem).where(WorkItem.order_id == order.id)).one()
         confirm.status = "completed"
@@ -178,6 +180,11 @@ def _seed_ride(
                 "ticket_id": "ticket-ride",
                 "estimated_ready_at": (now + timedelta(seconds=12)).isoformat(),
                 "accept_key": dispatch_key,
+                **(
+                    {"service_started_at": service_started_at.isoformat()}
+                    if service_started_at is not None
+                    else {}
+                ),
             },
         )
         session.add(item)
@@ -312,6 +319,135 @@ def test_dispatch_uses_stored_key_and_schedules_ride_at_eta(
         assert event.to_state == "out_for_delivery"
 
 
+def test_assigned_dispatch_stays_ready_and_polls_at_pickup(
+    db_engine: Engine, session_factory: sessionmaker[Session]
+) -> None:
+    now = datetime.now(UTC)
+    pickup_at = now + timedelta(seconds=12)
+    eta = pickup_at + timedelta(seconds=20)
+    worker_id = "dispatch-assigned"
+    order_id, item_id, stored_key, claimed = _seed_ready_dispatch(
+        session_factory, now=now, worker_id=worker_id
+    )
+    courier = FakeCourierClient(
+        accept_body={
+            "ticket_id": "ticket-assigned",
+            "accepted_at": now.isoformat(),
+            "service_started_at": pickup_at.isoformat(),
+            "estimated_ready_at": eta.isoformat(),
+            "status": "assigned",
+        }
+    )
+    rides = CourierHandlers(_settings(), courier, now_fn=lambda: now)
+    worker = Worker(
+        _settings(),
+        db_engine,
+        handlers={"dispatch": rides.dispatch},
+        worker_id=worker_id,
+        now_fn=lambda: now,
+    )
+
+    asyncio.run(worker.process(claimed))
+
+    with session_factory() as session:
+        order = session.get(Order, order_id)
+        dispatch_item = session.get(WorkItem, item_id)
+        ride_item = session.scalars(
+            select(WorkItem).where(
+                WorkItem.order_id == order_id,
+                WorkItem.work_type == "poll_ride",
+            )
+        ).one()
+        dispatch_events = session.scalars(
+            select(OrderEvent).where(
+                OrderEvent.order_id == order_id,
+                OrderEvent.cause == CAUSE_DISPATCH,
+                OrderEvent.applied.is_(True),
+            )
+        ).all()
+        assert order is not None
+        assert dispatch_item is not None
+        assert order.state == "ready"
+        assert dispatch_item.status == "completed"
+        assert dispatch_item.idempotency_key == stored_key
+        assert ride_item.next_attempt_at == pickup_at
+        assert dispatch_events == []
+
+
+def test_assigned_ride_stays_ready_then_pickup_advances_out_for_delivery(
+    db_engine: Engine, session_factory: sessionmaker[Session]
+) -> None:
+    now = datetime.now(UTC)
+    pickup_at = now + timedelta(seconds=5)
+    worker_id = "ride-assigned"
+    order_id, item_id, dispatch_key, assigned_claim = _seed_ride(
+        session_factory,
+        now=now,
+        worker_id=worker_id,
+        order_state="ready",
+        service_started_at=pickup_at,
+    )
+    courier = FakeCourierClient(poll_body={"status": "assigned"})
+    rides = CourierHandlers(_settings(), courier, now_fn=lambda: now)
+    worker = Worker(
+        _settings(),
+        db_engine,
+        handlers={"poll_ride": rides.poll_ride},
+        worker_id=worker_id,
+        now_fn=lambda: now,
+    )
+
+    asyncio.run(worker.process(assigned_claim))
+
+    with session_factory.begin() as session:
+        order = session.get(Order, order_id)
+        ride_item = session.get(WorkItem, item_id)
+        assert order is not None
+        assert ride_item is not None
+        assert order.state == "ready"
+        assert ride_item.status == "pending"
+        assert ride_item.next_attempt_at == pickup_at
+
+        pickup_claim = _claim(
+            session,
+            item_id,
+            now=pickup_at,
+            worker_id=worker_id,
+            work_types=("poll_ride",),
+        )
+        assert pickup_claim is not None
+
+    courier.poll_body = {"status": "en_route"}
+    pickup_rides = CourierHandlers(_settings(), courier, now_fn=lambda: pickup_at)
+    pickup_worker = Worker(
+        _settings(),
+        db_engine,
+        handlers={"poll_ride": pickup_rides.poll_ride},
+        worker_id=worker_id,
+        now_fn=lambda: pickup_at,
+    )
+    asyncio.run(pickup_worker.process(pickup_claim))
+
+    with session_factory() as session:
+        order = session.get(Order, order_id)
+        ride_item = session.get(WorkItem, item_id)
+        pickup_event = session.scalars(
+            select(OrderEvent).where(
+                OrderEvent.order_id == order_id,
+                OrderEvent.cause == CAUSE_DISPATCH,
+                OrderEvent.applied.is_(True),
+            )
+        ).one()
+        assert order is not None
+        assert ride_item is not None
+        assert courier.get_calls == [dispatch_key, dispatch_key]
+        assert order.state == "out_for_delivery"
+        assert ride_item.status == "pending"
+        assert ride_item.next_attempt_at == now + timedelta(seconds=12)
+        assert pickup_event.from_state == "ready"
+        assert pickup_event.to_state == "out_for_delivery"
+
+
 def test_poll_ride_reuses_dispatch_key_not_queue_key(
     db_engine: Engine, session_factory: sessionmaker[Session]
 ) -> None:
@@ -377,7 +513,7 @@ def test_poll_ride_en_route_does_not_invent_a_stage(
         assert ride_item is not None
         assert order.state == "out_for_delivery"
         assert ride_item.status == "pending"
-        assert ride_item.next_attempt_at == now + timedelta(seconds=3)
+        assert ride_item.next_attempt_at == now + timedelta(seconds=12)
         delivered = session.scalars(
             select(OrderEvent).where(
                 OrderEvent.order_id == order_id, OrderEvent.to_state == "delivered"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -32,60 +33,72 @@ def _dashboard_src() -> str:
     return "\n".join(path.read_text() for path in files)
 
 
-def test_dashboard_source_has_assignment_stage_cards_and_lite_fields() -> None:
+def test_dashboard_source_has_unified_lifecycle_and_evidence() -> None:
     home = (DASHBOARD / "src" / "HomePage.tsx").read_text()
     snapshot = (DASHBOARD / "src" / "snapshot.ts").read_text()
     for label in ASSIGNMENT_STAGES:
         assert f'"{label}"' in snapshot, label
+    for text in (
+        "Every order, one visible journey",
+        "Restaurant accepted",
+        "Preparation underway",
+        "Ready for pickup",
+        "Restaurant",
+        "Delivery",
+        "Handoff",
+        "Cancelled",
+        "Failed",
+        "Presenter controls",
+        "Correctness proof",
+    ):
+        assert text in home
     assert "STAGE_LABELS.map" in home
     assert "STAGE_SEAMS" in home
-    assert "queued" in home
-    assert "cooking" in home
-    assert "waiting for" in home
-    assert "on a pan" in home
-    assert '"confirmed"' in snapshot
-    assert '"being prepared"' in snapshot
-    assert "queued — waiting for a pan" in snapshot
-    assert "cooking — on a pan" in snapshot
-    assert "stages?.[" in home
-    assert "snapshot.stages" in home or "stages?.[" in home
-    assert "currently_leased" in home
-    assert "currently_leased_items" in home
-    assert "row.order_id" in home
-    assert "row.owner" in home
-    assert "state_vs_last_order_events_mismatches" in home
-    assert "duplicate_attempts" in home
-    assert "duplicate_effects" in home
-    assert "startup_scan" in home
-    assert "invalid_transitions" in home
-    assert "orphaned_tickets" in home
+    assert "StageTickets" in home
+    assert "ticket-stack" in home
+    assert "displayCode" in home
+    assert "terminal-branches" in home
+    assert "orders: OrderSummary[]" in home
+    assert "orders: OrderSummary[]" in snapshot
+    assert "accepted — queued for preparation" in snapshot
+    assert "preparation underway" in snapshot
+    assert "waiting for courier assignment or pickup" in snapshot
+    assert "picked up — courier en route" in snapshot
+    assert "{index + 1}</span>" not in home
+    assert "<span>orders</span>" in home
+    assert "stageCounts?.[stage]" in home
+    for field in (
+        "currently_leased",
+        "currently_leased_items",
+        "state_vs_last_order_events_mismatches",
+        "duplicate_attempts",
+        "duplicate_effects",
+        "startup_scan",
+        "invalid_transitions",
+        "orphaned_tickets",
+        "conservation",
+        "terminal_rates_per_min",
+        "e2e_latency_s",
+        "oldest_open",
+        "backlog",
+        "retry_rate",
+        "sim_http",
+        "outbound_slots",
+        "parked_list",
+        "no_progress_beyond_threshold",
+    ):
+        assert field in home
     assert "orphaned_tickets" in snapshot
-    assert "conservation" in home
-    assert "terminal_rates_per_min" in home
-    assert "e2e_latency_s" in home
-    assert "oldest_open" in home
-    assert "accept_reject" in home
-    assert "backlog" in home
-    assert "retry_rate" in home
-    assert "http_429s" in home
-    assert "stretching_etas" in home
-    assert "sim_http" in home
-    assert "outbound_slots" in home
-    assert "http_5xx" in home
-    assert "http_429" in home
-    assert "timeout" in home
-    assert "parked_list" in home
-    assert "no_progress_beyond_threshold" in home
     assert "fetchLoadgenStatus" in home
-    assert "activeCohort = loadgen.cohort_id" in home
+    assert "fetchSimFaults" in home
+    assert "simFaultActive(simFaults?.restaurant)" in home
+    assert "simFaultActive(simFaults?.courier)" in home
+    assert "targeted confirms" in home
+    assert "Blackout ·" in home
+    assert "activeCohort = status.cohort_id" in home
     assert "showing the last known cohort" in home
     assert "setInterval" not in home
     assert 'fetch("/loadgen/status"' in snapshot
-    assert "Pipeline" in home
-    assert "parked list" in home
-    assert "oldest open" in home
-    assert "<button" in home.lower()
-    assert "redrive" in home.lower()
     assert "redriveWorkItem(row.id)" not in home
     assert "redrive(row.id)" in home
     assert "attempt.lease_owner" in home
@@ -93,68 +106,174 @@ def test_dashboard_source_has_assignment_stage_cards_and_lite_fields() -> None:
     assert "attempt.work_item_id" in home
     assert "result.idempotency_key" in home
     assert "redriving === row.id" in home
-    assert "outbound slots" in home.lower()
-    assert "configured cap" in home
-    assert "not live replica discovery" in home
-    assert "paste-an-ID" in home
-    assert "in each stage now" in home
+    assert "Paste-an-ID" in home
     assert "last 60 seconds" in home
-    assert "endings, not stages" in home
+    assert "DetailsDrawer" in home
+    assert "setDetailPanel(null)" in home
+    assert "setRailOpen(false)" in home
+    assert "sessionStorage" in home
     assert "<canvas" not in home.lower()
     assert "chart" not in home.lower()
 
 
-def test_control_load_group_posts_to_loadgen_proxy() -> None:
+def test_presenter_rail_posts_existing_scenarios_on_unified_surface() -> None:
     control = (DASHBOARD / "src" / "ControlPage.tsx").read_text()
     shell = (DASHBOARD / "src" / "Shell.tsx").read_text()
-    assert "<h1>Control</h1>" in control
+    assert "PresenterRail" in control
+    assert "Presenter controls" in control
     assert "fetch(path, init)" in control
+    # The fallback H is a guess, not a measurement: Normal may run on it, Rush
+    # may not, and the card must not call it calibrated.
+    assert "Fallback baseline" in control
+    assert "Ready · H" not in control
+    assert "disabled={disabled || !hasBaseline}" in control
+    assert "disabled={disabled || !calibrated}" in control
+    assert 'loadgen?.h_source === "calibrated"' in control
+    assert "Promise.allSettled" in control
+    assert "start += 8" in control
+    assert "redriveWorkItem(job.id)" in control
+    assert "courierFaultActive" in control
+    assert "loadgen={loadgen}" in (DASHBOARD / "src" / "HomePage.tsx").read_text()
     for path in (
         "/loadgen/calibrate",
         "/loadgen/cohort/new",
         "/loadgen/scenario/steady",
         "/loadgen/scenario/rush",
         "/loadgen/stop",
+        "/loadgen/beat/doom-confirm",
+        "/rsim/admin/faults",
+        "/csim/admin/faults",
+        "/csim/admin/capacity",
+        "/loadgen/beat/cancel-race",
+        "/loadgen/beat/place",
+        "/rsim/admin/stock",
     ):
         assert path in control, path
-    assert "Calibrate" in control
-    assert "New cohort" in control
-    assert "Steady" in control
-    assert "Rush" in control
-    assert "Stop" in control
-    assert "mult" in control
-    assert "Outage" in control
-    assert "/loadgen/beat/doom-confirm" in control
-    assert 'run("/rsim/admin/faults", { mode: "blackout", seconds: 60 })' in control
-    assert 'run("/rsim/admin/faults", { mode: "clear" })' in control
-    assert "Restaurant blackout (60s)" in control
-    assert "Crash assist" in control
-    assert 'run("/csim/admin/faults", { mode: "blackout", seconds: 30 })' in control
-    assert "Courier blackout (30s)" in control
-    assert "redrive" not in control.lower()
-    assert "Bonuses" in control
-    assert "Cancel race" in control
-    assert "Fail void" in control
-    assert "Out of stock" in control
-    assert "Restore stock" in control
-    assert "/loadgen/beat/cancel-race" in control
-    assert "/loadgen/beat/place" in control
-    assert "/rsim/admin/stock" in control
-    assert "fail_void" in control.lower()
-    assert control.index("Cancel race") < control.index("Fail void")
-    assert control.index("Fail void") < control.index("Out of stock")
-    oos = control.index('run("/rsim/admin/stock", { item: "burrito", count: 0 })')
-    place = control.index('run("/loadgen/beat/place", { item: "burrito" })')
-    restore = control.index('run("/rsim/admin/stock", { item: "burrito", count: 200 })')
-    assert oos < place < restore
-    assert control.index("Out of stock") < control.index("Restore stock")
-    assert "Pre-demo" in control
-    assert "Load" in control
-    assert "Outage" in control
-    assert "Crash assist" in control
+    for label in (
+        "Normal",
+        "Rush",
+        "Outage",
+        "Worker crash",
+        "Courier failure",
+        "Courier capacity",
+        "Fleet capacity",
+        "parked courier jobs",
+        "Redrive ${parkedCourierJobs.length} parked courier jobs",
+        "Reset demo",
+        "Setup & bonus beats",
+        "Calibrate",
+        "New cohort",
+        "Cancel race",
+        "Fail void",
+        "Out of stock",
+        "Restore stock",
+        "Redrive",
+    ):
+        assert label in control
     assert "kill" not in control.lower()
-    assert 'target="_blank"' in shell
-    assert 'href="/control"' in shell
+    assert 'Navigate to="/" replace' in control
+    assert 'target="_blank"' not in shell
+    assert 'href="/control"' not in shell
+
+
+def test_board_evidence_cannot_name_the_wrong_subsystem() -> None:
+    """The chips and scenario facts must not restate a claim the data cannot support."""
+    home = (DASHBOARD / "src" / "HomePage.tsx").read_text()
+
+    # "Fault active" follows the armed fault, not the trailing error counters:
+    # the always-on mix keeps those above zero and a blackout drains them.
+    assert 'if (faultArmed) return "fault";' in home
+    assert 'if (lane.timeout + lane.http_5xx > 0) return "fault";' not in home
+    assert "healthForLane(\n    simHttp?.restaurant,\n    restaurantFault," in home
+    assert "healthForLane(\n    simHttp?.courier,\n    deliveryFault," in home
+
+    # Work that cannot progress is stalled work, attributed by type.
+    assert "Stalled work" in home
+    assert "workTypeSummary(parked)" in home
+
+    # A courier blackout lands in timeout/unknown, so a 5xx-only headline is
+    # structurally zero for the whole beat.
+    assert "sim_http.courier.timeout" in home
+    assert "dependency errors" in home
+    assert "courier busy 429s" in home
+    assert "{fmt(snapshot?.sim_http.courier.http_5xx)}</b><small>courier 5xx" not in home
+
+    # Redrive is refused while the matching dependency fault is still armed.
+    assert "redriveBlocker(" in home
+    assert "disabled={redriving !== null || blocker !== null}" in home
+    assert "disabled={redriving !== null}" not in home
+
+
+def test_board_follows_one_ticket_and_clears_it_with_the_cohort() -> None:
+    """Focus must survive a ticket's journey and not survive its cohort."""
+    home = (DASHBOARD / "src" / "HomePage.tsx").read_text()
+
+    # Re-picking the newest arrival every poll would park focus in Placed.
+    assert "pinnedOrderId" in home
+    assert "const effectiveFocusId = focusedOrderId ?? pinnedOrderId;" in home
+    assert "automaticFocus" not in home
+
+    # Reset demo / New cohort mint a cohort in which the old selection matches
+    # nothing, which would otherwise leave the board with no focused ticket.
+    assert "shownCohortRef" in home
+    assert "setPinnedOrderId(null)" in home
+    assert "setFocusedOrderId(null)" in home
+
+    # The followed order is requested by id so it stays in the bounded window.
+    assert "const followId = focusedOrderId ?? pinnedOrderIdRef.current;" in home
+    assert "followId && ORDER_ID_RE.test(followId)" in home
+
+
+def test_presentation_type_never_drops_below_the_screen_share_floor() -> None:
+    """Anything under 11px is unreadable once Zoom compresses the shared screen."""
+    css = (DASHBOARD / "src" / "styles.css").read_text()
+
+    too_small = re.findall(r"font-size:\s*(\d+(?:\.\d+)?)px", css)
+    assert [size for size in too_small if float(size) < 11] == []
+
+    # Fluid sizes must not clamp their way back under the floor either.
+    for lower, _upper in re.findall(
+        r"font-size:\s*clamp\(\s*(\d+(?:\.\d+)?)px\s*,[^,]+,\s*(\d+(?:\.\d+)?)px",
+        css,
+    ):
+        assert float(lower) >= 11, lower
+
+    # Stage names are the labels the audience reads from across a call.
+    assert "font-size: clamp(16px, 1.35vw, 20px)" in css
+    # The narrow-viewport override used to push the seam copy down to 7px.
+    assert ".stage-title small {\n    font-size: 7px;\n  }" not in css
+
+
+def test_panels_scroll_as_one_body_and_contain_focus() -> None:
+    """The rail must not cram five scenario cards into an inner well."""
+    css = (DASHBOARD / "src" / "styles.css").read_text()
+    control = (DASHBOARD / "src" / "ControlPage.tsx").read_text()
+    home = (DASHBOARD / "src" / "HomePage.tsx").read_text()
+    trap = (DASHBOARD / "src" / "focusTrap.ts").read_text()
+
+    # One scroll container between the fixed heading and footer.
+    assert '<div className="rail-body">' in control
+    assert ".rail-body,\n.drawer-content {" in css
+    assert "flex: 1;\n  min-height: 0;\n  overflow-y: auto;" in css
+    assert ".scenario-list,\n.drawer-content {" not in css
+
+    # The demo sequence comes before the secondary capacity controls.
+    assert control.index('className="scenario-list"') < control.index('className="capacity-card"')
+
+    # Dialog semantics, initial focus, and a Tab trap on both panels.
+    for source in (control, home):
+        assert 'role="dialog"' in source
+        assert 'aria-modal="true"' in source
+        assert "tabIndex={-1}" in source
+        assert "useFocusTrap(" in source
+    assert 'event.key !== "Tab"' in trap
+    assert "event.preventDefault()" in trap
+
+    # Escape and focus return must not depend on a frame that a hidden page
+    # never paints.
+    assert "restoreFocus(presenterButtonRef.current)" in home
+    assert "restoreFocus(lastDetailTriggerRef.current)" in home
+    assert "window.requestAnimationFrame(" not in home
 
 
 def test_only_vite_knob_is_api_base_url() -> None:

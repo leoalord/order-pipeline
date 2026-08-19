@@ -133,7 +133,12 @@ def create_app(
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         driver.set_rate(rate)
-        return {"rate_rps": rate, "h": driver.h, "cohort_id": str(driver.cohort_id)}
+        return {
+            "rate_rps": rate,
+            "h": driver.h,
+            "h_source": driver.h_source,
+            "cohort_id": str(driver.cohort_id),
+        }
 
     @app.post("/scenario/rush")
     async def rush(
@@ -154,6 +159,7 @@ def create_app(
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         plan["h"] = driver.h
+        plan["h_source"] = driver.h_source
         plan["cohort_id"] = str(driver.cohort_id)
         return plan
 

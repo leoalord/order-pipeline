@@ -19,6 +19,7 @@ from order_pipeline.api.schemas import (
     LeasedRow,
     NoProgress,
     OldestOpen,
+    OrderSummary,
     OrderTrace,
     OutboundSlots,
     ParkedRow,
@@ -346,6 +347,20 @@ def build_snapshot(
     currently_leased_items.sort(key=lambda row: (row.lease_until, row.id))
     currently_leased = len(currently_leased_items)
 
+    # The stage counts remain the aggregate source of truth. This bounded,
+    # additive projection only gives the presentation enough real UUIDs to
+    # render tickets and open details. Keep an explicitly requested order even
+    # when it falls outside the recent window.
+    recent_orders = sorted(
+        orders,
+        key=lambda row: (_aware(row.accepted_at), row.id),
+        reverse=True,
+    )[:72]
+    if order_id is not None and order_id in cohort_order_ids:
+        focused = next(row for row in orders if row.id == order_id)
+        if all(row.id != focused.id for row in recent_orders):
+            recent_orders.append(focused)
+
     latencies: list[float] = []
     for order in orders:
         if order.state != "delivered":
@@ -412,7 +427,7 @@ def build_snapshot(
             continue
         if live.state in {"placed", "confirmed", "being_prepared"}:
             relevant_types = KITCHEN_WORK
-        elif live.state == "out_for_delivery":
+        elif live.state in {"ready", "out_for_delivery"}:
             relevant_types = COURIER_WORK
         else:
             continue
@@ -479,6 +494,15 @@ def build_snapshot(
         state_vs_last_order_events_mismatches=mismatches,
         currently_leased=currently_leased,
         currently_leased_items=currently_leased_items,
+        orders=[
+            OrderSummary(
+                id=order.id,
+                state=order.state,
+                accepted_at=order.accepted_at,
+                items=list(order.items),
+            )
+            for order in recent_orders
+        ],
         trace=trace,
         accept_reject=AcceptReject(accepted=accepted, rejected=door_429s),
         backlog=backlog,
