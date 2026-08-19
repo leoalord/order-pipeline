@@ -128,7 +128,14 @@ def test_cancel_from_confirmed_cancels_parked_work(
         assert result.outcome is CancelOutcome.APPLIED
 
     with session_factory() as session:
-        item = session.scalars(select(WorkItem).where(WorkItem.order_id == order_id)).one()
+        # Scoped to the confirm item: cancelling a confirmed order also queues
+        # the void_ticket that compensates its kitchen ticket.
+        item = session.scalars(
+            select(WorkItem).where(
+                WorkItem.order_id == order_id,
+                WorkItem.work_type == "confirm",
+            )
+        ).one()
         assert item.status == "cancelled"
         assert item.lease_owner is None
         assert item.lease_until is None

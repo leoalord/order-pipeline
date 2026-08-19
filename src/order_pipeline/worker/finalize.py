@@ -6,10 +6,15 @@ import random
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
-from order_pipeline.intake import void_idempotency_key
+from order_pipeline.compensation import (
+    CONFIRM_WORK_TYPES,
+    VOID_TICKET_WORK_TYPE,
+    KitchenEffect,
+    enqueue_void_ticket,
+)
 from order_pipeline.lifecycle import CAUSE_INVALID, CAUSE_ORPHANED, is_legal_transition
 from order_pipeline.models import Attempt, Order, OrderEvent, WorkItem
 from order_pipeline.worker.backoff import full_jitter_delay_s
@@ -24,7 +29,6 @@ from order_pipeline.worker.plugin import (
 )
 from order_pipeline.worker.settings import WorkerSettings
 from order_pipeline.worker.stop_rules import (
-    CONFIRM_WORK_TYPES,
     confirm_deadline_exceeded,
     count_budget_exhausted,
     count_budget_for,
@@ -36,7 +40,6 @@ CAUSE_CONFIRM_DEADLINE = "confirm_deadline"
 PARK_REASON_GUARD_REJECTED = "guarded_transition_rejected"
 PARK_NEXT_ACTION_GUARD_REJECTED = "inspect_then_redrive"
 TERMINAL_ORDER_STATES = frozenset({"delivered", "cancelled", "failed"})
-VOID_TICKET_WORK_TYPE = "void_ticket"
 
 
 def _orphan_if_void_exhausted(
@@ -260,32 +263,35 @@ def _is_orphan_payload(payload: object) -> bool:
     return isinstance(payload, dict) and payload.get("orphaned_ticket") is True
 
 
-def _enqueue_void_ticket(
-    session: Session,
-    claimed: ClaimedWork,
-    policy: HandlerResult,
-    now: datetime,
-) -> None:
-    key = void_idempotency_key(claimed.order_id)
-    existing = session.scalars(
-        select(WorkItem).where(WorkItem.idempotency_key == key)
-    ).one_or_none()
-    if existing is not None:
-        return
+def _kitchen_effect(claimed: ClaimedWork, policy: HandlerResult, now: datetime) -> KitchenEffect:
+    """This worker's call has already returned, so the void may run immediately.
+
+    Even an unknown or failed confirm has a stable stored key. The restaurant
+    resolves it to the applied ticket or completes an idempotent no-op.
+    """
     payload = dict(policy.result_payload) if isinstance(policy.result_payload, dict) else {}
-    # Even an unknown/failed confirm has a stable stored key. The restaurant
-    # resolves it to the applied ticket or completes an idempotent no-op.
-    payload["accept_key"] = claimed.idempotency_key
-    session.add(
-        WorkItem(
-            order_id=claimed.order_id,
-            work_type=VOID_TICKET_WORK_TYPE,
-            status="pending",
-            idempotency_key=key,
-            attempt_count=0,
-            next_attempt_at=now,
-            payload=payload,
-        )
+    return KitchenEffect(
+        accept_key=claimed.idempotency_key,
+        ready_at=now,
+        payload=payload,
+    )
+
+
+def _confirm_crossed_its_deadline(claimed: ClaimedWork, policy: HandlerResult) -> bool:
+    """The deadline turns even a successful confirm into an explicit failure.
+
+    Whatever this attempt returned, the order's one accept key was sent to the
+    restaurant at least once inside the deadline window, and a 5xx that landed
+    *after* the ticket was written is indistinguishable from one before it
+    (easy wrong turn 4). So the failure keeps its policy and takes a void with
+    it. A permanent 4xx is the one confirm outcome that proves absence — the sim
+    replays a known key instead of re-rejecting it, so a 4xx means no effect was
+    ever written — and it still fails without compensation.
+    """
+    return (
+        claimed.work_type in CONFIRM_WORK_TYPES
+        and policy.transition is not None
+        and policy.transition.cause == CAUSE_CONFIRM_DEADLINE
     )
 
 
@@ -360,7 +366,14 @@ def finalize_claim(
         _release_lease(item)
         item.status = "cancelled"
         if claimed.work_type in CONFIRM_WORK_TYPES and order.state == "cancelled":
-            _enqueue_void_ticket(session, claimed, policy, now)
+            # cancel_order already queued this void at the call boundary. Now the
+            # boundary has demonstrably passed, so pull the same item forward and
+            # hand it the ticket_id this attempt learned.
+            enqueue_void_ticket(
+                session,
+                order_id=claimed.order_id,
+                effect=_kitchen_effect(claimed, policy, now),
+            )
         return
 
     if not applied:
@@ -376,6 +389,12 @@ def finalize_claim(
         _release_lease(item)
         item.status = "failed"
         item.result = policy.result_payload
+        if _confirm_crossed_its_deadline(claimed, policy):
+            enqueue_void_ticket(
+                session,
+                order_id=claimed.order_id,
+                effect=_kitchen_effect(claimed, policy, now),
+            )
         return
     if disposition is WorkDisposition.PARK:
         _release_lease(item)

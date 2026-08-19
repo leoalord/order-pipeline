@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from order_pipeline.intake import confirm_idempotency_key, place_order
+from order_pipeline.intake import confirm_idempotency_key, place_order, void_idempotency_key
 from order_pipeline.models import Order, OrderEvent, WorkItem
 from order_pipeline.worker.chassis import Worker
 from order_pipeline.worker.claim import claim_next
@@ -220,10 +220,15 @@ def test_confirm_deadline_compare_fails_the_order(
         assert event.to_state == "failed"
 
 
-def test_confirm_success_returning_at_deadline_still_fails_explicitly(
+def test_confirm_success_returning_at_deadline_fails_and_compensates(
     session_factory: sessionmaker[Session],
 ) -> None:
-    """A pre-deadline call cannot confirm after its individual 120s clock."""
+    """A pre-deadline call cannot confirm after its individual 120s clock.
+
+    The policy stays explicit failure, but the accept key had already been sent
+    to the kitchen, so the failure takes a void with it. Failing without one is
+    the silent live ticket this replaced.
+    """
     now = datetime.now(UTC)
     order_id, item_id, stored_key, claimed = _seed_and_claim(
         session_factory,
@@ -242,6 +247,7 @@ def test_confirm_success_returning_at_deadline_still_fails_explicitly(
                     to_state="confirmed",
                     cause="confirm",
                 ),
+                result_payload={"ticket_id": "ticket-late", "accept_key": stored_key},
             ),
             settings=_settings(),
             counters=WorkerCounters(),
@@ -265,6 +271,66 @@ def test_confirm_success_returning_at_deadline_still_fails_explicitly(
             )
         )
         assert [event.cause for event in events] == ["place", CAUSE_CONFIRM_DEADLINE]
+
+        voids = list(
+            session.scalars(
+                select(WorkItem).where(
+                    WorkItem.order_id == order_id,
+                    WorkItem.work_type == "void_ticket",
+                )
+            )
+        )
+        assert len(voids) == 1
+        void_item = voids[0]
+        assert void_item.idempotency_key == void_idempotency_key(order_id)
+        assert void_item.status == "pending"
+        assert isinstance(void_item.payload, dict)
+        assert void_item.payload["accept_key"] == stored_key
+        assert void_item.payload["ticket_id"] == "ticket-late"
+
+
+def test_confirm_permanent_4xx_fails_without_a_void(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A 4xx is the one confirm failure that proves absence — nothing to compensate.
+
+    The sim replays a known key instead of re-rejecting it, so a permanent
+    rejection means no effect was ever written under this order's accept key.
+    """
+    now = datetime.now(UTC)
+    order_id, item_id, _stored_key, claimed = _seed_and_claim(
+        session_factory,
+        now=now,
+        worker_id="kitchen-permanent",
+    )
+
+    with session_factory.begin() as session:
+        finalize_claim(
+            session,
+            claimed,
+            HandlerResult(outcome="http_4xx"),
+            settings=_settings(),
+            counters=WorkerCounters(),
+            now=now,
+            rng=random.Random(0),
+        )
+
+    with session_factory() as session:
+        order = session.get(Order, order_id)
+        item = session.get(WorkItem, item_id)
+        assert order is not None
+        assert item is not None
+        assert order.state == "failed"
+        assert item.status == "failed"
+        assert (
+            session.scalars(
+                select(WorkItem).where(
+                    WorkItem.order_id == order_id,
+                    WorkItem.work_type == "void_ticket",
+                )
+            ).one_or_none()
+            is None
+        )
 
 
 def _seed_poll_at_budget(

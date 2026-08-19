@@ -1,4 +1,4 @@
-"""Pre-pivot diner cancel. In-flight confirm finalize enqueues void_ticket."""
+"""Pre-pivot diner cancel. A cancel that can strand a kitchen ticket compensates it."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from uuid import UUID
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from order_pipeline.compensation import enqueue_void_ticket, kitchen_effect_at_cancel
 from order_pipeline.lifecycle import CAUSE_INVALID, is_legal_transition
 from order_pipeline.models import Order, OrderEvent, WorkItem
 
@@ -127,6 +128,15 @@ def cancel_order(
             applied=True,
         )
     )
+    # Read the confirm item's pre-cancel lease before _cancel_open_work rewrites
+    # it, but enqueue after, so the sweep cannot cancel the void it just created.
+    # We already hold the order row lock, which is what stops this and a racing
+    # finalize from both inserting under (order_id, void).
+    effect = kitchen_effect_at_cancel(session, order.id, order_state=expected_state, now=at)
     _cancel_open_work(session, order.id)
+    if effect is not None:
+        # Compensation does not wait for the losing worker to survive and
+        # finalize: a ticket that may exist gets a void the moment cancel wins.
+        enqueue_void_ticket(session, order_id=order.id, effect=effect)
     session.refresh(order)
     return CancelResult(order=order, outcome=CancelOutcome.APPLIED)
