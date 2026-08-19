@@ -16,3 +16,5 @@ htmlcov/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+
+artifacts/
