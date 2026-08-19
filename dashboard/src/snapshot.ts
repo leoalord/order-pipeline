@@ -183,6 +183,9 @@ function apiPath(path: string): string {
 export type LoadgenStatus = {
   cohort_id: string;
   h: number | null;
+  /** "fallback" until a calibrate run measures this host. */
+  h_source?: string;
+  calibrated?: boolean;
   rate_rps: number;
   placed: number;
   rejected_429: number;

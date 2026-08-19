@@ -60,6 +60,11 @@ function simFaultLabel(status: SimFaultStatus | undefined, normal: string): stri
 const ORDER_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+const TERMINAL_STATES = ["delivered", "cancelled", "failed"];
+
+/** Hold a completed ticket briefly so the audience sees it land before re-pinning. */
+const PIN_DWELL_MS = 6000;
+
 const API_STATE_BY_STAGE: Record<StageLabel, string> = {
   placed: "placed",
   confirmed: "confirmed",
@@ -139,9 +144,23 @@ function ageLabel(iso: string): string {
   return `${Math.round(seconds / 60)}m ago`;
 }
 
-function healthForLane(lane: SimHttpLane | undefined, used = 0, cap = 1): HealthTone {
+/**
+ * An armed simulator fault is the only source of "Fault active".
+ *
+ * Error counts cannot carry that meaning in either direction: the always-on
+ * error mix keeps timeouts and 5xx permanently above zero, and a blackout stops
+ * traffic entirely, so the trailing-60s counters drain to zero while the fault
+ * is still armed. Backpressure (429s, slot saturation) is a separate, weaker
+ * claim. Raw dependency counts stay visible in the zone drawer.
+ */
+function healthForLane(
+  lane: SimHttpLane | undefined,
+  faultArmed: boolean,
+  used = 0,
+  cap = 1,
+): HealthTone {
+  if (faultArmed) return "fault";
   if (!lane) return "pressure";
-  if (lane.timeout + lane.http_5xx > 0) return "fault";
   if (lane.http_429 > 0 || used / Math.max(cap, 1) >= 0.75) return "pressure";
   return "healthy";
 }
@@ -150,6 +169,36 @@ function healthLabel(tone: HealthTone): string {
   return { healthy: "Healthy", pressure: "Pressure", fault: "Fault active" }[
     tone
   ];
+}
+
+const COURIER_WORK = ["dispatch", "poll_ride"];
+
+/**
+ * Redriving into an armed fault re-parks the same key within one retry budget,
+ * which reads on screen as recovery not working. The rail already refuses;
+ * the drawer button sits under the parked ticket, so it is the one reached for.
+ */
+function redriveBlocker(
+  workType: string,
+  restaurantFault: boolean,
+  courierFault: boolean,
+): string | null {
+  if (COURIER_WORK.includes(workType)) {
+    return courierFault ? "Delivery" : null;
+  }
+  return restaurantFault ? "Restaurant" : null;
+}
+
+/** Names the parked work by type so a stall is attributed, not blamed on workers. */
+function workTypeSummary(rows: { work_type: string }[]): string {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    counts.set(row.work_type, (counts.get(row.work_type) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([type, count]) => `${count} ${type}`)
+    .join(" · ");
 }
 
 function TicketButton({
@@ -290,11 +339,20 @@ function ScenarioFacts({
     );
   }
   if (scenario === "courier_failure") {
+    // A blackout drops the connection, so it lands in timeout/unknown rather
+    // than 5xx. Counting 5xx alone leaves this headline at zero all beat.
+    const courierErrors =
+      (snapshot?.sim_http.courier.timeout ?? 0) +
+      (snapshot?.sim_http.courier.http_5xx ?? 0);
+    const courierParked =
+      snapshot?.parked_list.filter((row) =>
+        ["dispatch", "poll_ride"].includes(row.work_type),
+      ).length ?? 0;
     return (
       <div className="scenario-facts" aria-label="Courier failure evidence">
-        <span><b>{fmt(snapshot?.parked_list.length)}</b><small>parked</small></span>
-        <span><b>{fmt(snapshot?.sim_http.courier.http_5xx)}</b><small>courier 5xx</small></span>
-        <span><b>{fmt(snapshot?.backlog.dispatch)}</b><small>dispatch backlog</small></span>
+        <span><b>{courierParked}</b><small>parked courier work</small></span>
+        <span><b>{courierErrors}</b><small>dependency errors</small></span>
+        <span><b>{fmt(snapshot?.sim_http.courier.http_429)}</b><small>courier busy 429s</small></span>
       </div>
     );
   }
@@ -313,6 +371,7 @@ export function HomePage() {
   const [simFaults, setSimFaults] = useState<SimFaults | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [focusedOrderId, setFocusedOrderId] = useState<string | null>(null);
+  const [pinnedOrderId, setPinnedOrderId] = useState<string | null>(null);
   const [lookupId, setLookupId] = useState("");
   const [detailPanel, setDetailPanel] = useState<DetailPanel | null>(null);
   const [railOpen, setRailOpen] = useState(false);
@@ -333,6 +392,13 @@ export function HomePage() {
   const cohortIdRef = useRef<string | null>(null);
   const presenterButtonRef = useRef<HTMLButtonElement>(null);
   const lastDetailTriggerRef = useRef<HTMLElement | null>(null);
+  const pinnedOrderIdRef = useRef<string | null>(null);
+  const shownCohortRef = useRef<string | null>(null);
+  const pinCompletedAtRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    pinnedOrderIdRef.current = pinnedOrderId;
+  }, [pinnedOrderId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -363,12 +429,13 @@ export function HomePage() {
               ? `${err.message}; showing the last known dependency state`
               : "dependency state unavailable; showing the last known state";
         }
+        // Ask for the followed order by id so it stays in the bounded
+        // projection even after it ages out of the recent window.
+        const followId = focusedOrderId ?? pinnedOrderIdRef.current;
         const body = await fetchSnapshot({
           cohortId: activeCohort,
           orderId:
-            focusedOrderId && ORDER_ID_RE.test(focusedOrderId)
-              ? focusedOrderId
-              : undefined,
+            followId && ORDER_ID_RE.test(followId) ? followId : undefined,
           signal: controller.signal,
         });
         if (!controller.signal.aborted) {
@@ -412,13 +479,56 @@ export function HomePage() {
   }, [detailPanel, railOpen]);
 
   const orders = snapshot?.orders ?? [];
-  const automaticFocus = orders.find(
-    (order) => !["delivered", "cancelled", "failed"].includes(order.state),
-  );
-  const effectiveFocusId = focusedOrderId ?? automaticFocus?.id ?? orders[0]?.id ?? null;
+  const effectiveFocusId = focusedOrderId ?? pinnedOrderId;
   const focusedOrder = orders.find((order) => order.id === effectiveFocusId) ?? null;
   const trace =
-    snapshot?.trace?.order_id === focusedOrderId ? snapshot.trace : null;
+    snapshot?.trace?.order_id === effectiveFocusId ? snapshot.trace : null;
+
+  // Reset demo and New cohort mint a new cohort. Selections from the previous
+  // one match nothing, so keeping them leaves the board with no focused ticket.
+  const cohortId = snapshot?.cohort_id ?? null;
+  useEffect(() => {
+    if (cohortId === null) return;
+    if (shownCohortRef.current === null) {
+      shownCohortRef.current = cohortId;
+      return;
+    }
+    if (shownCohortRef.current === cohortId) return;
+    shownCohortRef.current = cohortId;
+    pinCompletedAtRef.current = null;
+    setFocusedOrderId(null);
+    setPinnedOrderId(null);
+    setLookupId("");
+    setDetailPanel(null);
+    setRedriveStatus(null);
+  }, [cohortId]);
+
+  // Follow one ticket through its whole journey. Re-picking the newest arrival
+  // every poll would leave focus parked in Placed for the entire demo.
+  useEffect(() => {
+    if (focusedOrderId !== null) return;
+    const pinned = orders.find((order) => order.id === pinnedOrderId);
+    if (pinned && !TERMINAL_STATES.includes(pinned.state)) {
+      pinCompletedAtRef.current = null;
+      return;
+    }
+    if (pinned) {
+      const completedAt = pinCompletedAtRef.current;
+      if (completedAt === null) {
+        pinCompletedAtRef.current = Date.now();
+        return;
+      }
+      if (Date.now() - completedAt < PIN_DWELL_MS) return;
+    }
+    const next =
+      orders.find((order) => !TERMINAL_STATES.includes(order.state)) ??
+      orders[0] ??
+      null;
+    if (next && next.id !== pinnedOrderId) {
+      pinCompletedAtRef.current = null;
+      setPinnedOrderId(next.id);
+    }
+  }, [orders, pinnedOrderId, focusedOrderId]);
 
   const stageCounts = snapshot?.stages;
   const conservation = snapshot?.conservation;
@@ -427,22 +537,31 @@ export function HomePage() {
   const slots = snapshot?.outbound_slots;
   const parked = snapshot?.parked_list ?? [];
 
+  const restaurantFault = simFaultActive(simFaults?.restaurant);
+  const deliveryFault = simFaultActive(simFaults?.courier);
+
   const restaurantTone = healthForLane(
     simHttp?.restaurant,
+    restaurantFault,
     slots?.restaurant.used,
     slots?.restaurant.cap,
   );
   const deliveryTone = healthForLane(
     simHttp?.courier,
+    deliveryFault,
     slots?.courier.used,
     slots?.courier.cap,
   );
+  // Work that cannot progress is stalled work, not a worker failure. A parked
+  // courier dispatch stops the clock on its order while every worker is fine.
+  const stalledOrders = snapshot?.no_progress_beyond_threshold.count ?? 0;
+  const workerStalled = stalledOrders > 0 || parked.length > 0;
   const workerTone: HealthTone =
-    (snapshot?.no_progress_beyond_threshold.count ?? 0) > 0
-      ? "fault"
-      : (snapshot?.retry_rate ?? 0) > 0.2
-        ? "pressure"
-        : "healthy";
+    workerStalled || (snapshot?.retry_rate ?? 0) > 0.2 ? "pressure" : "healthy";
+  const workerLabel = workerStalled ? "Stalled work" : healthLabel(workerTone);
+  const workerDetail = workerStalled
+    ? `${stalledOrders} stalled · ${workTypeSummary(parked) || "no parked work"}`
+    : `${fmt(snapshot?.currently_leased)} leased · ${fmt(parked.length)} parked`;
 
   const terminalOrders = useMemo(
     () => ({
@@ -511,8 +630,13 @@ export function HomePage() {
   };
 
   const scenario = SCENARIO_COPY[activeScenario];
-  const restaurantFault = simFaultActive(simFaults?.restaurant);
-  const deliveryFault = simFaultActive(simFaults?.courier);
+  // A global blackout fails every confirm, so the standing copy about ordinary
+  // orders continuing would contradict the board while it is armed.
+  const scenarioBody =
+    activeScenario === "outage" &&
+    (simFaults?.restaurant.blackout_remaining_s ?? 0) > 0
+      ? "Restaurant is blacked out. Every confirm call fails and retries with the same key; orders hold until the lane recovers."
+      : scenario.body;
 
   return (
     <main className="presentation">
@@ -558,12 +682,12 @@ export function HomePage() {
       </header>
 
       <div className="presentation-body">
-        <section className={`scenario-callout ${scenario.tone}`} aria-live="polite">
-          <div>
+        <section className={`scenario-callout ${scenario.tone}`}>
+          <div aria-live="polite">
             <span className="eyebrow">Now showing</span>
             <strong>{scenario.title}</strong>
           </div>
-          <p>{scenario.body}</p>
+          <p aria-live="polite">{scenarioBody}</p>
           <ScenarioFacts
             scenario={activeScenario}
             snapshot={snapshot}
@@ -746,7 +870,11 @@ export function HomePage() {
             >
               <span>Restaurant</span>
               <strong>{healthLabel(restaurantTone)}</strong>
-              <small>{fmt(slots?.restaurant.used)} / {fmt(slots?.restaurant.cap)} slots</small>
+              <small>
+                {restaurantFault
+                  ? simFaultLabel(simFaults?.restaurant, "fault armed")
+                  : `${fmt(slots?.restaurant.used)} / ${fmt(slots?.restaurant.cap)} slots`}
+              </small>
             </button>
             <button
               type="button"
@@ -759,8 +887,8 @@ export function HomePage() {
               }
             >
               <span>Workers</span>
-              <strong>{healthLabel(workerTone)}</strong>
-              <small>{fmt(snapshot?.currently_leased)} leased · {fmt(parked.length)} parked</small>
+              <strong>{workerLabel}</strong>
+              <small>{workerDetail}</small>
             </button>
             <button
               type="button"
@@ -774,7 +902,11 @@ export function HomePage() {
             >
               <span>Delivery</span>
               <strong>{healthLabel(deliveryTone)}</strong>
-              <small>{fmt(slots?.courier.used)} / {fmt(slots?.courier.cap)} slots</small>
+              <small>
+                {deliveryFault
+                  ? simFaultLabel(simFaults?.courier, "fault armed")
+                  : `${fmt(slots?.courier.used)} / ${fmt(slots?.courier.cap)} slots`}
+              </small>
             </button>
           </div>
 
@@ -844,6 +976,8 @@ export function HomePage() {
           <DetailsDrawer
             panel={detailPanel}
             snapshot={snapshot}
+            restaurantFault={restaurantFault}
+            courierFault={deliveryFault}
             order={focusedOrder}
             trace={trace}
             lookupId={lookupId}
@@ -863,6 +997,8 @@ export function HomePage() {
 function DetailsDrawer({
   panel,
   snapshot,
+  restaurantFault,
+  courierFault,
   order,
   trace,
   lookupId,
@@ -875,6 +1011,8 @@ function DetailsDrawer({
 }: {
   panel: DetailPanel;
   snapshot: Snapshot | null;
+  restaurantFault: boolean;
+  courierFault: boolean;
   order: OrderSummary | null;
   trace: Snapshot["trace"];
   lookupId: string;
@@ -919,6 +1057,8 @@ function DetailsDrawer({
           order={order}
           trace={trace}
           snapshot={snapshot}
+          restaurantFault={restaurantFault}
+          courierFault={courierFault}
           lookupId={lookupId}
           setLookupId={setLookupId}
           submitLookup={submitLookup}
@@ -928,7 +1068,11 @@ function DetailsDrawer({
         />
       ) : null}
       {panel.kind === "zone" ? (
-        <ZoneDetails zone={panel.zone} snapshot={snapshot} />
+        <ZoneDetails
+          zone={panel.zone}
+          snapshot={snapshot}
+          faultArmed={panel.zone === "restaurant" ? restaurantFault : courierFault}
+        />
       ) : null}
       {panel.kind === "correctness" ? (
         <CorrectnessDetails snapshot={snapshot} />
@@ -936,6 +1080,8 @@ function DetailsDrawer({
       {panel.kind === "system" ? (
         <WorkerDetails
           snapshot={snapshot}
+          restaurantFault={restaurantFault}
+          courierFault={courierFault}
           redrive={redrive}
           redriving={redriving}
           redriveStatus={redriveStatus}
@@ -949,6 +1095,8 @@ function OrderDetails({
   order,
   trace,
   snapshot,
+  restaurantFault,
+  courierFault,
   lookupId,
   setLookupId,
   submitLookup,
@@ -959,6 +1107,8 @@ function OrderDetails({
   order: OrderSummary | null;
   trace: Snapshot["trace"];
   snapshot: Snapshot | null;
+  restaurantFault: boolean;
+  courierFault: boolean;
   lookupId: string;
   setLookupId: (value: string) => void;
   submitLookup: () => void;
@@ -1070,22 +1220,34 @@ function OrderDetails({
         </div>
       </section>
 
-      {parked.map((row) => (
-        <section className="parked-action" key={row.id}>
-          <span aria-hidden="true">!</span>
-          <div>
-            <strong>Parked {row.work_type}</strong>
-            <p>{row.reason ?? "Retry budget exhausted"} · {row.next_action ?? "Redrive after recovery"}</p>
-            <button
-              type="button"
-              disabled={redriving !== null}
-              onClick={() => void redrive(row.id)}
-            >
-              {redriving === row.id ? "Redriving…" : "Redrive same work item"}
-            </button>
-          </div>
-        </section>
-      ))}
+      {parked.map((row) => {
+        const blocker = redriveBlocker(
+          row.work_type,
+          restaurantFault,
+          courierFault,
+        );
+        return (
+          <section className="parked-action" key={row.id}>
+            <span aria-hidden="true">!</span>
+            <div>
+              <strong>Parked {row.work_type}</strong>
+              <p>{row.reason ?? "Retry budget exhausted"} · {row.next_action ?? "Redrive after recovery"}</p>
+              <button
+                type="button"
+                disabled={redriving !== null || blocker !== null}
+                onClick={() => void redrive(row.id)}
+              >
+                {redriving === row.id ? "Redriving…" : "Redrive same work item"}
+              </button>
+              {blocker ? (
+                <small className="redrive-warning">
+                  Recover the {blocker} service before redriving parked jobs.
+                </small>
+              ) : null}
+            </div>
+          </section>
+        );
+      })}
       {redriveStatus ? <p className="action-status" role="status">{redriveStatus}</p> : null}
     </div>
   );
@@ -1094,9 +1256,11 @@ function OrderDetails({
 function ZoneDetails({
   zone,
   snapshot,
+  faultArmed,
 }: {
   zone: "restaurant" | "delivery";
   snapshot: Snapshot | null;
+  faultArmed: boolean;
 }) {
   const lane =
     zone === "restaurant"
@@ -1118,7 +1282,7 @@ function ZoneDetails({
         </span>
         <div>
           <span className="state-badge">
-            {healthLabel(healthForLane(lane, slots?.used, slots?.cap))}
+            {healthLabel(healthForLane(lane, faultArmed, slots?.used, slots?.cap))}
           </span>
           <p>
             {zone === "restaurant"
@@ -1142,8 +1306,10 @@ function ZoneDetails({
         </dl>
       </section>
       <p className="explain-note">
-        A fault changes the border, icon, label, and supporting evidence. Meaning
-        never depends on color alone.
+        “Fault active” reflects an armed dependency fault, not these counts: the
+        always-on error mix keeps them above zero, and a blackout drains them by
+        stopping traffic. A fault changes the border, icon, label, and supporting
+        evidence. Meaning never depends on color alone.
       </p>
     </div>
   );
@@ -1181,11 +1347,15 @@ function CorrectnessDetails({ snapshot }: { snapshot: Snapshot | null }) {
 
 function WorkerDetails({
   snapshot,
+  restaurantFault,
+  courierFault,
   redrive,
   redriving,
   redriveStatus,
 }: {
   snapshot: Snapshot | null;
+  restaurantFault: boolean;
+  courierFault: boolean;
   redrive: (workItemId: string) => Promise<void>;
   redriving: string | null;
   redriveStatus: string | null;
@@ -1224,20 +1394,31 @@ function WorkerDetails({
           <span>Recover dependency before Redrive</span>
         </div>
         <div className="row-list parked-rows">
-          {parked.map((row) => (
-            <article key={row.id}>
-              <strong>{displayCode(row.order_id)} · {row.work_type}</strong>
-              <span>{row.owner ?? "unowned"} · {row.reason ?? "budget exhausted"}</span>
-              <small>{row.next_action ?? "Redrive after recovery"}</small>
-              <button
-                type="button"
-                disabled={redriving !== null}
-                onClick={() => void redrive(row.id)}
-              >
-                {redriving === row.id ? "Redriving…" : "Redrive"}
-              </button>
-            </article>
-          ))}
+          {parked.map((row) => {
+            const blocker = redriveBlocker(
+              row.work_type,
+              restaurantFault,
+              courierFault,
+            );
+            return (
+              <article key={row.id}>
+                <strong>{displayCode(row.order_id)} · {row.work_type}</strong>
+                <span>{row.owner ?? "unowned"} · {row.reason ?? "budget exhausted"}</span>
+                <small>
+                  {blocker
+                    ? `Recover the ${blocker} service before redriving.`
+                    : (row.next_action ?? "Redrive after recovery")}
+                </small>
+                <button
+                  type="button"
+                  disabled={redriving !== null || blocker !== null}
+                  onClick={() => void redrive(row.id)}
+                >
+                  {redriving === row.id ? "Redriving…" : "Redrive"}
+                </button>
+              </article>
+            );
+          })}
           {parked.length === 0 ? <p className="empty-message">No parked work.</p> : null}
         </div>
       </section>

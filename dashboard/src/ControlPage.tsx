@@ -248,7 +248,11 @@ export function PresenterRail({
   };
 
   const disabled = busy !== null;
-  const calibrated = (loadgen?.h ?? 0) > 0;
+  // Boot ships a conservative fallback H, so a positive H is not a measurement.
+  // Normal walks fine on the fallback; Rush sizes its peak off H and needs a real one.
+  const hasBaseline = (loadgen?.h ?? 0) > 0;
+  const calibrated =
+    hasBaseline && (loadgen?.calibrated ?? loadgen?.h_source === "calibrated");
 
   return (
     <aside
@@ -285,13 +289,13 @@ export function PresenterRail({
           <span>Capacity baseline</span>
           <strong>
             {calibrated
-              ? `Ready · H ${(loadgen?.h ?? 0).toFixed(2)} orders / sec`
-              : "Required before Normal or Rush"}
+              ? `Calibrated · H ${(loadgen?.h ?? 0).toFixed(2)} orders / sec`
+              : `Fallback baseline · H ${(loadgen?.h ?? 0).toFixed(2)} · unverified`}
           </strong>
           <small>
             {calibrated
               ? "Recalibrate after changing the worker or dependency topology."
-              : "Run once after the load generator starts or restarts."}
+              : "Normal runs on the fallback. Rush needs a measured H, or its peak can land below this host's capacity."}
           </small>
         </div>
         <button
@@ -322,8 +326,8 @@ export function PresenterRail({
           <input
             id="courier-capacity"
             type="range"
-            min={4}
-            max={32}
+            min={capacity?.min_fleet_size ?? 4}
+            max={capacity?.max_fleet_size ?? 32}
             step={1}
             value={capacityDraft}
             aria-label="Courier fleet capacity"
@@ -387,7 +391,7 @@ export function PresenterRail({
             <p>Steady arrivals; follow a ticket through every lifecycle stage.</p>
             <button
               type="button"
-              disabled={disabled || !calibrated}
+              disabled={disabled || !hasBaseline}
               onClick={() =>
                 void run("/loadgen/scenario/steady", undefined, "normal")
               }
@@ -425,6 +429,12 @@ export function PresenterRail({
             >
               Start rush
             </button>
+            {!calibrated ? (
+              <small className="scenario-warning">
+                Calibrate first. On the fallback baseline the rush peak can sit
+                below this host's capacity and produce no visible pressure.
+              </small>
+            ) : null}
           </div>
         </section>
 

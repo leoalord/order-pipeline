@@ -1283,6 +1283,15 @@ button:disabled {
   font-weight: 850;
 }
 
+.scenario-card .scenario-warning,
+.parked-action .redrive-warning {
+  display: block;
+  margin-top: 7px;
+  color: var(--amber);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .scenario-card .secondary-button,
 .button-pair .secondary-button {
   background: transparent;

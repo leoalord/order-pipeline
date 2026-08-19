@@ -112,6 +112,24 @@ def test_conservative_default_h_allows_scenarios_before_calibration() -> None:
     assert driver.rush_rps() == 0.375
 
 
+def test_status_reports_the_fallback_h_as_unmeasured() -> None:
+    """Rush sizes its peak off H, so callers must be able to tell a guess from a measurement."""
+    driver = OpenLoopDriver(LoadgenSettings(default_h=0.25), FakePipeline())
+
+    status = driver.snapshot_status()
+    assert status["h"] == 0.25
+    assert status["h_source"] == "fallback"
+    assert status["calibrated"] is False
+
+    driver.h = 0.4
+    driver.h_source = "calibrated"
+    assert driver.snapshot_status()["calibrated"] is True
+
+    # A calibration that never found a sustainable step is not a baseline.
+    driver.h = 0.0
+    assert driver.snapshot_status()["calibrated"] is False
+
+
 def test_rate_change_starts_a_new_clock_and_stop_fires_nothing_late() -> None:
     fake = FakePipeline()
     driver = OpenLoopDriver(LoadgenSettings(), fake, rng=random.Random(2))

@@ -121,8 +121,13 @@ def test_presenter_rail_posts_existing_scenarios_on_unified_surface() -> None:
     assert "PresenterRail" in control
     assert "Presenter controls" in control
     assert "fetch(path, init)" in control
-    assert "Required before Normal or Rush" in control
+    # The fallback H is a guess, not a measurement: Normal may run on it, Rush
+    # may not, and the card must not call it calibrated.
+    assert "Fallback baseline" in control
+    assert "Ready · H" not in control
+    assert "disabled={disabled || !hasBaseline}" in control
     assert "disabled={disabled || !calibrated}" in control
+    assert 'loadgen?.h_source === "calibrated"' in control
     assert "Promise.allSettled" in control
     assert "start += 8" in control
     assert "redriveWorkItem(job.id)" in control
@@ -168,6 +173,54 @@ def test_presenter_rail_posts_existing_scenarios_on_unified_surface() -> None:
     assert 'Navigate to="/" replace' in control
     assert 'target="_blank"' not in shell
     assert 'href="/control"' not in shell
+
+
+def test_board_evidence_cannot_name_the_wrong_subsystem() -> None:
+    """The chips and scenario facts must not restate a claim the data cannot support."""
+    home = (DASHBOARD / "src" / "HomePage.tsx").read_text()
+
+    # "Fault active" follows the armed fault, not the trailing error counters:
+    # the always-on mix keeps those above zero and a blackout drains them.
+    assert 'if (faultArmed) return "fault";' in home
+    assert 'if (lane.timeout + lane.http_5xx > 0) return "fault";' not in home
+    assert "healthForLane(\n    simHttp?.restaurant,\n    restaurantFault," in home
+    assert "healthForLane(\n    simHttp?.courier,\n    deliveryFault," in home
+
+    # Work that cannot progress is stalled work, attributed by type.
+    assert "Stalled work" in home
+    assert "workTypeSummary(parked)" in home
+
+    # A courier blackout lands in timeout/unknown, so a 5xx-only headline is
+    # structurally zero for the whole beat.
+    assert "sim_http.courier.timeout" in home
+    assert "dependency errors" in home
+    assert "courier busy 429s" in home
+    assert "{fmt(snapshot?.sim_http.courier.http_5xx)}</b><small>courier 5xx" not in home
+
+    # Redrive is refused while the matching dependency fault is still armed.
+    assert "redriveBlocker(" in home
+    assert "disabled={redriving !== null || blocker !== null}" in home
+    assert "disabled={redriving !== null}" not in home
+
+
+def test_board_follows_one_ticket_and_clears_it_with_the_cohort() -> None:
+    """Focus must survive a ticket's journey and not survive its cohort."""
+    home = (DASHBOARD / "src" / "HomePage.tsx").read_text()
+
+    # Re-picking the newest arrival every poll would park focus in Placed.
+    assert "pinnedOrderId" in home
+    assert "const effectiveFocusId = focusedOrderId ?? pinnedOrderId;" in home
+    assert "automaticFocus" not in home
+
+    # Reset demo / New cohort mint a cohort in which the old selection matches
+    # nothing, which would otherwise leave the board with no focused ticket.
+    assert "shownCohortRef" in home
+    assert "setPinnedOrderId(null)" in home
+    assert "setFocusedOrderId(null)" in home
+
+    # The followed order is requested by id so it stays in the bounded window.
+    assert "const followId = focusedOrderId ?? pinnedOrderIdRef.current;" in home
+    assert "followId && ORDER_ID_RE.test(followId)" in home
 
 
 def test_only_vite_knob_is_api_base_url() -> None:
