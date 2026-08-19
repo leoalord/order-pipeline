@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -221,6 +222,58 @@ def test_board_follows_one_ticket_and_clears_it_with_the_cohort() -> None:
     # The followed order is requested by id so it stays in the bounded window.
     assert "const followId = focusedOrderId ?? pinnedOrderIdRef.current;" in home
     assert "followId && ORDER_ID_RE.test(followId)" in home
+
+
+def test_presentation_type_never_drops_below_the_screen_share_floor() -> None:
+    """Anything under 11px is unreadable once Zoom compresses the shared screen."""
+    css = (DASHBOARD / "src" / "styles.css").read_text()
+
+    too_small = re.findall(r"font-size:\s*(\d+(?:\.\d+)?)px", css)
+    assert [size for size in too_small if float(size) < 11] == []
+
+    # Fluid sizes must not clamp their way back under the floor either.
+    for lower, _upper in re.findall(
+        r"font-size:\s*clamp\(\s*(\d+(?:\.\d+)?)px\s*,[^,]+,\s*(\d+(?:\.\d+)?)px",
+        css,
+    ):
+        assert float(lower) >= 11, lower
+
+    # Stage names are the labels the audience reads from across a call.
+    assert "font-size: clamp(16px, 1.35vw, 20px)" in css
+    # The narrow-viewport override used to push the seam copy down to 7px.
+    assert ".stage-title small {\n    font-size: 7px;\n  }" not in css
+
+
+def test_panels_scroll_as_one_body_and_contain_focus() -> None:
+    """The rail must not cram five scenario cards into an inner well."""
+    css = (DASHBOARD / "src" / "styles.css").read_text()
+    control = (DASHBOARD / "src" / "ControlPage.tsx").read_text()
+    home = (DASHBOARD / "src" / "HomePage.tsx").read_text()
+    trap = (DASHBOARD / "src" / "focusTrap.ts").read_text()
+
+    # One scroll container between the fixed heading and footer.
+    assert '<div className="rail-body">' in control
+    assert ".rail-body,\n.drawer-content {" in css
+    assert "flex: 1;\n  min-height: 0;\n  overflow-y: auto;" in css
+    assert ".scenario-list,\n.drawer-content {" not in css
+
+    # The demo sequence comes before the secondary capacity controls.
+    assert control.index('className="scenario-list"') < control.index('className="capacity-card"')
+
+    # Dialog semantics, initial focus, and a Tab trap on both panels.
+    for source in (control, home):
+        assert 'role="dialog"' in source
+        assert 'aria-modal="true"' in source
+        assert "tabIndex={-1}" in source
+        assert "useFocusTrap(" in source
+    assert 'event.key !== "Tab"' in trap
+    assert "event.preventDefault()" in trap
+
+    # Escape and focus return must not depend on a frame that a hidden page
+    # never paints.
+    assert "restoreFocus(presenterButtonRef.current)" in home
+    assert "restoreFocus(lastDetailTriggerRef.current)" in home
+    assert "window.requestAnimationFrame(" not in home
 
 
 def test_only_vite_knob_is_api_base_url() -> None:

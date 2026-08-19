@@ -124,13 +124,13 @@ button:disabled {
 }
 
 .brand-lockup strong {
-  font-size: 15px;
+  font-size: 16px;
   letter-spacing: -0.01em;
 }
 
 .brand-lockup span:last-child {
-  color: var(--muted);
-  font-size: 10px;
+  color: var(--muted-strong);
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.12em;
 }
@@ -152,7 +152,7 @@ button:disabled {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 750;
   white-space: nowrap;
 }
@@ -185,15 +185,15 @@ button:disabled {
 }
 
 .arrival-rate {
-  color: var(--muted);
-  font-size: 11px;
+  color: var(--muted-strong);
+  font-size: 13px;
   white-space: nowrap;
 }
 
 .arrival-rate strong {
   color: var(--text);
   font-variant-numeric: tabular-nums;
-  font-size: 16px;
+  font-size: 17px;
 }
 
 .presenter-button {
@@ -205,7 +205,7 @@ button:disabled {
   border-radius: 10px;
   background: var(--surface-raised);
   color: var(--text);
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 850;
   cursor: pointer;
   display: inline-flex;
@@ -274,20 +274,20 @@ button:disabled {
 }
 
 .scenario-callout strong {
-  font-size: 13px;
+  font-size: 17px;
 }
 
 .scenario-callout p {
   margin: 0;
   color: var(--muted-strong);
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.35;
 }
 
 .cohort-code {
   color: var(--muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .scenario-facts {
@@ -305,22 +305,30 @@ button:disabled {
 }
 
 .scenario-facts b {
-  font-size: 12px;
+  font-size: 20px;
+  line-height: 1.1;
   font-variant-numeric: tabular-nums;
 }
 
 .scenario-facts small {
-  color: var(--muted);
-  font-size: 7px;
-  letter-spacing: 0.05em;
+  color: var(--muted-strong);
+  font-size: 11px;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
   white-space: nowrap;
+}
+
+.fact-detail {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  line-height: 1.25;
 }
 
 .eyebrow {
   margin: 0;
   color: var(--aqua);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 850;
   letter-spacing: 0.15em;
   text-transform: uppercase;
@@ -357,8 +365,8 @@ button:disabled {
 
 .surface-heading > p {
   margin: 0;
-  color: var(--muted);
-  font-size: 10px;
+  color: var(--muted-strong);
+  font-size: 13px;
 }
 
 .surface-heading > p strong {
@@ -394,15 +402,15 @@ button:disabled {
 }
 
 .zone-label span {
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 850;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
 .zone-label small {
-  color: var(--muted);
-  font-size: 9px;
+  color: var(--muted-strong);
+  font-size: 11px;
 }
 
 .zone-label.fault {
@@ -416,9 +424,9 @@ button:disabled {
 }
 
 .handoff-label {
-  color: var(--muted);
+  color: var(--muted-strong);
   text-align: center;
-  font-size: 8px;
+  font-size: 11px;
   font-weight: 750;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -506,29 +514,21 @@ button:disabled {
   text-align: center;
 }
 
-.stage-title > span {
-  color: var(--muted);
-  font-size: 8px;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-}
-
 .stage-title h2 {
-  min-height: 31px;
-  margin: 3px 0 1px;
-  font-size: clamp(12px, 1.02vw, 15px);
-  line-height: 1.03;
+  min-height: 38px;
+  margin: 0 0 2px;
+  font-size: clamp(16px, 1.35vw, 20px);
+  line-height: 1.05;
   letter-spacing: -0.02em;
   display: grid;
   place-items: center;
 }
 
 .stage-title small {
-  min-height: 22px;
-  color: var(--muted);
-  font-size: 8px;
-  line-height: 1.15;
+  min-height: 26px;
+  color: var(--muted-strong);
+  font-size: 11px;
+  line-height: 1.2;
   display: block;
 }
 
@@ -542,13 +542,13 @@ button:disabled {
 }
 
 .stage-count strong {
-  font-size: 15px;
+  font-size: 18px;
   font-variant-numeric: tabular-nums;
 }
 
 .stage-count span {
-  color: var(--muted);
-  font-size: 7px;
+  color: var(--muted-strong);
+  font-size: 11px;
   text-transform: uppercase;
 }
 
@@ -591,15 +591,15 @@ button:disabled {
 
 .ticket-code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
+  font-size: 15px;
   font-weight: 900;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.08em;
   line-height: 1;
 }
 
 .ticket-items {
   color: var(--muted);
-  font-size: 7px;
+  font-size: 11px;
   line-height: 1;
   text-transform: uppercase;
 }
@@ -640,12 +640,12 @@ button:disabled {
 
 .ticket-stack strong {
   color: var(--muted-strong);
-  font-size: 11px;
+  font-size: 14px;
 }
 
 .ticket-stack small {
-  color: var(--muted);
-  font-size: 7px;
+  color: var(--muted-strong);
+  font-size: 11px;
   text-transform: uppercase;
 }
 
@@ -655,10 +655,10 @@ button:disabled {
   padding: 5px 8px;
   border: 1px dashed var(--line);
   border-radius: 7px;
-  color: #687282;
-  font-size: 8px;
+  color: #7d8798;
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
@@ -713,17 +713,17 @@ button:disabled {
 }
 
 .terminal-branch strong {
-  font-size: 10px;
+  font-size: 13px;
 }
 
 .terminal-branch small {
-  color: var(--muted);
-  font-size: 8px;
+  color: var(--muted-strong);
+  font-size: 11px;
 }
 
 .terminal-branch > b {
-  min-width: 30px;
-  font-size: 18px;
+  min-width: 34px;
+  font-size: 20px;
   font-variant-numeric: tabular-nums;
   text-align: center;
 }
@@ -769,19 +769,19 @@ button:disabled {
 
 .outcome-heading > span {
   color: var(--aqua);
-  font-size: 8px;
+  font-size: 11px;
   font-weight: 850;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
 .outcome-heading > strong {
-  font-size: 11px;
+  font-size: 13px;
 }
 
 .outcome-heading > small {
-  color: var(--muted);
-  font-size: 8px;
+  color: var(--muted-strong);
+  font-size: 11px;
   line-height: 1.25;
 }
 
@@ -797,22 +797,22 @@ button:disabled {
 }
 
 .evidence-metric > span {
-  color: var(--muted);
-  font-size: 8px;
+  color: var(--muted-strong);
+  font-size: 11px;
   font-weight: 750;
-  letter-spacing: 0.07em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
 }
 
 .evidence-metric > strong {
-  font-size: clamp(15px, 1.45vw, 22px);
+  font-size: clamp(18px, 1.5vw, 24px);
   line-height: 1;
   font-variant-numeric: tabular-nums;
 }
 
 .evidence-metric > small {
   color: var(--muted-strong);
-  font-size: 8px;
+  font-size: 11px;
 }
 
 .evidence-metric.healthy {
@@ -848,19 +848,21 @@ button:disabled {
 }
 
 .health-chip > span {
-  color: var(--muted);
-  font-size: 8px;
+  color: var(--muted-strong);
+  font-size: 11px;
   font-weight: 750;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
 }
 
 .health-chip > strong {
-  font-size: 11px;
+  font-size: 15px;
 }
 
 .health-chip > small {
-  color: var(--muted);
-  font-size: 7px;
+  color: var(--muted-strong);
+  font-size: 11px;
+  line-height: 1.25;
 }
 
 .health-chip.healthy {
@@ -931,20 +933,22 @@ button:disabled {
 }
 
 .correctness-proof small {
-  color: var(--muted);
-  font-size: 8px;
+  color: var(--muted-strong);
+  font-size: 11px;
   font-weight: 750;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
 }
 
 .correctness-proof strong {
-  font-size: 12px;
+  font-size: 15px;
 }
 
 .correctness-proof b {
   color: var(--muted-strong);
-  font-size: 8px;
+  font-size: 11px;
   font-weight: 600;
+  line-height: 1.25;
 }
 
 .correctness-proof > i {
@@ -1029,7 +1033,7 @@ button:disabled {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
   white-space: nowrap;
 }
@@ -1049,8 +1053,8 @@ button:disabled {
   margin: 0;
   padding: 12px 18px;
   border-bottom: 1px solid var(--line);
-  color: var(--muted);
-  font-size: 11px;
+  color: var(--muted-strong);
+  font-size: 12px;
 }
 
 .panel-summary strong {
@@ -1087,25 +1091,26 @@ button:disabled {
 
 .calibration-card span,
 .calibration-card small {
-  color: var(--muted);
-  font-size: 9px;
+  color: var(--muted-strong);
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .calibration-card strong {
   color: var(--text);
-  font-size: 11px;
+  font-size: 13px;
 }
 
 .calibration-card button {
   flex: none;
-  min-height: 34px;
-  padding: 0 10px;
+  min-height: 36px;
+  padding: 0 12px;
   border: 1px solid rgb(179 254 247 / 35%);
   border-radius: 8px;
   background: var(--aqua);
   color: #071112;
   cursor: pointer;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 850;
 }
 
@@ -1135,13 +1140,13 @@ button:disabled {
 .capacity-heading span,
 .capacity-card label span,
 .capacity-card p {
-  color: var(--muted);
-  font-size: 9px;
+  color: var(--muted-strong);
+  font-size: 11px;
 }
 
 .capacity-heading strong {
   color: var(--text);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .capacity-heading output {
@@ -1149,7 +1154,7 @@ button:disabled {
   border: 1px solid rgb(105 221 174 / 35%);
   border-radius: 999px;
   color: var(--green);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 800;
 }
 
@@ -1174,7 +1179,7 @@ button:disabled {
   border: 1px solid var(--line-strong);
   border-radius: 6px;
   color: var(--muted-strong);
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .capacity-card p {
@@ -1184,13 +1189,13 @@ button:disabled {
 
 .capacity-card button {
   width: 100%;
-  min-height: 34px;
+  min-height: 36px;
   border: 1px solid rgb(105 221 174 / 45%);
   border-radius: 8px;
   background: var(--green);
   color: #06130f;
   cursor: pointer;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 850;
 }
 
@@ -1209,7 +1214,7 @@ button:disabled {
   display: block;
   margin-top: 7px;
   color: var(--amber);
-  font-size: 9px;
+  font-size: 12px;
   line-height: 1.35;
 }
 
@@ -1219,16 +1224,29 @@ button:disabled {
   opacity: 0.48;
 }
 
-.scenario-list,
+/* One scroll container between the fixed heading and footer. Scrolling an
+   inner well instead left five scenario cards fighting over ~146px at
+   1280x720, with the rail itself not scrolling at all. */
+.rail-body,
 .drawer-content {
+  flex: 1;
   min-height: 0;
-  padding: 14px 16px 20px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   scrollbar-width: thin;
   scrollbar-color: var(--line-strong) transparent;
 }
 
+.drawer-content {
+  padding: 14px 16px 20px;
+}
+
+.rail-body {
+  padding-bottom: 14px;
+}
+
 .scenario-list {
+  padding: 14px 16px 6px;
   display: grid;
   gap: 9px;
 }
@@ -1259,21 +1277,21 @@ button:disabled {
 }
 
 .scenario-number {
-  color: var(--muted);
+  color: var(--muted-strong);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 850;
 }
 
 .scenario-card h3 {
   margin: 0;
-  font-size: 14px;
+  font-size: 16px;
 }
 
 .scenario-card p {
   margin: 4px 0 9px;
-  color: var(--muted);
-  font-size: 10px;
+  color: var(--muted-strong);
+  font-size: 12px;
   line-height: 1.4;
 }
 
@@ -1283,14 +1301,14 @@ button:disabled {
 .parked-action button,
 .parked-rows button,
 .order-lookup button {
-  min-height: 33px;
-  padding: 0 10px;
+  min-height: 36px;
+  padding: 0 12px;
   border: 1px solid rgb(179 254 247 / 35%);
   border-radius: 8px;
   background: var(--aqua);
   color: #071112;
   cursor: pointer;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 850;
 }
 
@@ -1317,10 +1335,10 @@ button:disabled {
 }
 
 .mult {
-  max-width: 135px;
+  max-width: 150px;
   margin: 0 6px 7px 0;
-  color: var(--muted);
-  font-size: 9px;
+  color: var(--muted-strong);
+  font-size: 11px;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -1352,7 +1370,7 @@ button:disabled {
 .rail-setup summary {
   color: var(--muted-strong);
   cursor: pointer;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 750;
 }
 
@@ -1373,20 +1391,20 @@ button:disabled {
 
 .reset-button {
   width: 100%;
-  min-height: 38px;
+  min-height: 40px;
   border: 1px solid var(--line-strong);
   border-radius: 9px;
   background: var(--surface-raised);
   color: var(--text);
   cursor: pointer;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 800;
 }
 
 .action-status {
   margin: 8px 0 0;
-  color: var(--muted);
-  font-size: 9px;
+  color: var(--muted-strong);
+  font-size: 11px;
   line-height: 1.35;
   overflow-wrap: anywhere;
 }
@@ -1408,7 +1426,7 @@ button:disabled {
   display: block;
   margin-bottom: 6px;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 750;
   text-transform: uppercase;
 }
@@ -1451,7 +1469,7 @@ button:disabled {
 .drawer-hero p {
   margin: 0;
   color: var(--muted-strong);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .state-badge {
@@ -1460,7 +1478,7 @@ button:disabled {
   border: 1px solid rgb(179 254 247 / 34%);
   border-radius: 999px;
   color: var(--aqua);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 850;
 }
 
@@ -1487,7 +1505,7 @@ button:disabled {
 .detail-list dt,
 .detail-list dd {
   margin: 0;
-  font-size: 9px;
+  font-size: 12px;
 }
 
 .detail-list dt {
@@ -1523,7 +1541,7 @@ button:disabled {
 
 .drawer-section-heading span {
   color: var(--muted);
-  font-size: 8px;
+  font-size: 11px;
 }
 
 .timeline {
@@ -1572,12 +1590,12 @@ button:disabled {
 }
 
 .timeline strong {
-  font-size: 10px;
+  font-size: 13px;
 }
 
 .timeline small {
   color: var(--muted);
-  font-size: 8px;
+  font-size: 11px;
   line-height: 1.3;
 }
 
@@ -1604,7 +1622,7 @@ button:disabled {
 
 .attempt-list strong,
 .row-list strong {
-  font-size: 10px;
+  font-size: 13px;
 }
 
 .attempt-outcome {
@@ -1612,7 +1630,7 @@ button:disabled {
   border: 1px solid rgb(99 215 164 / 35%);
   border-radius: 999px;
   color: var(--green);
-  font-size: 7px;
+  font-size: 11px;
   font-weight: 800;
   text-transform: uppercase;
 }
@@ -1638,7 +1656,7 @@ button:disabled {
 .attempt-list dt,
 .attempt-list dd {
   margin: 0;
-  font-size: 8px;
+  font-size: 11px;
 }
 
 .attempt-list dt {
@@ -1678,7 +1696,7 @@ button:disabled {
 .parked-action p {
   margin: 4px 0 9px;
   color: #ffc4c8;
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .drawer-metrics {
@@ -1705,7 +1723,7 @@ button:disabled {
   border-left: 2px solid var(--aqua);
   background: var(--aqua-dark);
   color: var(--muted-strong);
-  font-size: 9px;
+  font-size: 11px;
   line-height: 1.45;
 }
 
@@ -1721,7 +1739,7 @@ button:disabled {
 
 .proof-equation span {
   color: var(--muted-strong);
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .proof-equation strong {
@@ -1748,7 +1766,7 @@ button:disabled {
 .row-list span,
 .row-list small {
   color: var(--muted);
-  font-size: 8px;
+  font-size: 11px;
   overflow-wrap: anywhere;
 }
 
@@ -1760,7 +1778,7 @@ button:disabled {
 .empty-message {
   margin: 8px 0;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 12px;
   line-height: 1.4;
 }
 
@@ -1804,8 +1822,10 @@ button:disabled {
     padding: 7px 5px;
   }
 
-  .stage-title small {
-    font-size: 7px;
+  /* Narrow viewports buy room from the gaps, never from the type floor —
+     this text has to survive screen-share compression. */
+  .stage-title h2 {
+    font-size: clamp(15px, 1.3vw, 18px);
   }
 
   .evidence-strip {

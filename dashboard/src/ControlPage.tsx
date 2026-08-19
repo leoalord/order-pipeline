@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Navigate } from "react-router-dom";
 
+import { useFocusTrap } from "./focusTrap";
 import {
   redriveWorkItem,
   type LoadgenStatus,
@@ -81,6 +82,9 @@ export function PresenterRail({
   const [notice, setNotice] = useState<string | null>(null);
   const [capacity, setCapacity] = useState<CourierCapacity | null>(null);
   const [capacityDraft, setCapacityDraft] = useState(8);
+  const railRef = useRef<HTMLElement>(null);
+
+  useFocusTrap(railRef, true);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -259,6 +263,10 @@ export function PresenterRail({
       className="side-panel presenter-rail"
       id="presenter-rail"
       aria-label="Presenter controls"
+      role="dialog"
+      aria-modal="true"
+      tabIndex={-1}
+      ref={railRef}
     >
       <div className="panel-heading">
         <div>
@@ -276,6 +284,7 @@ export function PresenterRail({
         </button>
       </div>
 
+      <div className="rail-body">
       <p className="panel-summary">
         Active: <strong>{scenarioLabel(activeScenario)}</strong>. Actions use
         the existing scenario endpoints.
@@ -309,72 +318,6 @@ export function PresenterRail({
               ? "Recalibrate"
               : "Calibrate first"}
         </button>
-      </section>
-
-      <section className="capacity-card" aria-label="Courier capacity">
-        <div className="capacity-heading">
-          <div>
-            <span>Courier capacity</span>
-            <strong>Fleet capacity · {capacityDraft} couriers</strong>
-          </div>
-          <output aria-live="polite">
-            {capacity ? `Live ${capacity.fleet_size}` : "Connecting…"}
-          </output>
-        </div>
-        <label htmlFor="courier-capacity">
-          <span>Fewer</span>
-          <input
-            id="courier-capacity"
-            type="range"
-            min={capacity?.min_fleet_size ?? 4}
-            max={capacity?.max_fleet_size ?? 32}
-            step={1}
-            value={capacityDraft}
-            aria-label="Courier fleet capacity"
-            aria-valuetext={`${capacityDraft} courier fleet capacity`}
-            disabled={disabled || capacity === null}
-            onChange={(event) => setCapacityDraft(Number(event.target.value))}
-          />
-          <span>More</span>
-        </label>
-        <div className="capacity-context">
-          <span>{readyOrders} Ready orders</span>
-          <span>{parkedCourierJobs.length} parked courier jobs</span>
-        </div>
-        <p>
-          Scaling affects new dispatches. Redrive parked courier jobs after the
-          Delivery service recovers.
-        </p>
-        <div className="capacity-actions">
-          <button
-            type="button"
-            disabled={
-              disabled || capacity === null || capacityDraft === capacity.fleet_size
-            }
-            onClick={() => void applyCourierCapacity()}
-          >
-            {busy === "/csim/admin/capacity"
-              ? "Applying…"
-              : `Apply ${capacityDraft} couriers`}
-          </button>
-          <button
-            className="redrive-all-button"
-            type="button"
-            disabled={
-              disabled || courierFaultActive || parkedCourierJobs.length === 0
-            }
-            onClick={() => void redriveAllCourierJobs()}
-          >
-            {busy === "redrive-courier"
-              ? "Redriving courier jobs…"
-              : `Redrive ${parkedCourierJobs.length} parked courier jobs`}
-          </button>
-        </div>
-        {courierFaultActive ? (
-          <small className="capacity-warning">
-            Recover the courier service before redriving parked jobs.
-          </small>
-        ) : null}
       </section>
 
       <div className="scenario-list">
@@ -558,6 +501,72 @@ export function PresenterRail({
         </section>
       </div>
 
+      <section className="capacity-card" aria-label="Courier capacity">
+        <div className="capacity-heading">
+          <div>
+            <span>Courier capacity</span>
+            <strong>Fleet capacity · {capacityDraft} couriers</strong>
+          </div>
+          <output aria-live="polite">
+            {capacity ? `Live ${capacity.fleet_size}` : "Connecting…"}
+          </output>
+        </div>
+        <label htmlFor="courier-capacity">
+          <span>Fewer</span>
+          <input
+            id="courier-capacity"
+            type="range"
+            min={capacity?.min_fleet_size ?? 4}
+            max={capacity?.max_fleet_size ?? 32}
+            step={1}
+            value={capacityDraft}
+            aria-label="Courier fleet capacity"
+            aria-valuetext={`${capacityDraft} courier fleet capacity`}
+            disabled={disabled || capacity === null}
+            onChange={(event) => setCapacityDraft(Number(event.target.value))}
+          />
+          <span>More</span>
+        </label>
+        <div className="capacity-context">
+          <span>{readyOrders} Ready orders</span>
+          <span>{parkedCourierJobs.length} parked courier jobs</span>
+        </div>
+        <p>
+          Scaling affects new dispatches. Redrive parked courier jobs after the
+          Delivery service recovers.
+        </p>
+        <div className="capacity-actions">
+          <button
+            type="button"
+            disabled={
+              disabled || capacity === null || capacityDraft === capacity.fleet_size
+            }
+            onClick={() => void applyCourierCapacity()}
+          >
+            {busy === "/csim/admin/capacity"
+              ? "Applying…"
+              : `Apply ${capacityDraft} couriers`}
+          </button>
+          <button
+            className="redrive-all-button"
+            type="button"
+            disabled={
+              disabled || courierFaultActive || parkedCourierJobs.length === 0
+            }
+            onClick={() => void redriveAllCourierJobs()}
+          >
+            {busy === "redrive-courier"
+              ? "Redriving courier jobs…"
+              : `Redrive ${parkedCourierJobs.length} parked courier jobs`}
+          </button>
+        </div>
+        {courierFaultActive ? (
+          <small className="capacity-warning">
+            Recover the courier service before redriving parked jobs.
+          </small>
+        ) : null}
+      </section>
+
       <details className="rail-setup">
         <summary>Setup & bonus beats</summary>
         <div className="button-pair">
@@ -616,6 +625,7 @@ export function PresenterRail({
           </button>
         </div>
       </details>
+      </div>
 
       <div className="rail-footer">
         <button

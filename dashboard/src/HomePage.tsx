@@ -11,6 +11,7 @@ import {
   scenarioLabel,
   type ScenarioId,
 } from "./ControlPage";
+import { useFocusTrap } from "./focusTrap";
 import {
   fetchLoadgenStatus,
   fetchSimFaults,
@@ -59,6 +60,16 @@ function simFaultLabel(status: SimFaultStatus | undefined, normal: string): stri
 
 const ORDER_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Return focus to whatever opened a panel. The trigger stays mounted while the
+ * panel is open, so this can run before React removes the panel. Deferring to
+ * requestAnimationFrame would silently skip restoration whenever the page is
+ * not visible, since the browser pauses frames there.
+ */
+function restoreFocus(trigger: HTMLElement | null): void {
+  if (trigger?.isConnected) trigger.focus();
+}
 
 const TERMINAL_STATES = ["delivered", "cancelled", "failed"];
 
@@ -315,7 +326,14 @@ function ScenarioFacts({
     return (
       <div className="scenario-facts" aria-label="Rush evidence">
         <span><b>{backlogTotal}</b><small>backlog</small></span>
-        <span title={`Door ${busy?.door ?? 0}, kitchen ${busy?.kitchen ?? 0}, courier ${busy?.courier ?? 0}`}><b>{busyTotal}</b><small>busy 429s</small></span>
+        <span>
+          <b>{busyTotal}</b>
+          <small>busy 429s</small>
+          <i className="fact-detail">
+            door {busy?.door ?? 0} · kitchen {busy?.kitchen ?? 0} · courier{" "}
+            {busy?.courier ?? 0}
+          </i>
+        </span>
         <span><b>{fmt(snapshot?.stretching_etas.max_stretch_s)}s</b><small>ETA stretch</small></span>
       </div>
     );
@@ -468,10 +486,10 @@ export function HomePage() {
       if (event.key !== "Escape") return;
       if (railOpen) {
         setRailOpen(false);
-        window.requestAnimationFrame(() => presenterButtonRef.current?.focus());
+        restoreFocus(presenterButtonRef.current);
       } else if (detailPanel) {
         setDetailPanel(null);
-        window.requestAnimationFrame(() => lastDetailTriggerRef.current?.focus());
+        restoreFocus(lastDetailTriggerRef.current);
       }
     };
     document.addEventListener("keydown", onKeyDown);
@@ -583,7 +601,7 @@ export function HomePage() {
 
   const closeRail = () => {
     setRailOpen(false);
-    window.requestAnimationFrame(() => presenterButtonRef.current?.focus());
+    restoreFocus(presenterButtonRef.current);
   };
 
   const openDetail = (panel: DetailPanel, trigger: HTMLElement) => {
@@ -600,7 +618,7 @@ export function HomePage() {
 
   const closeDetail = () => {
     setDetailPanel(null);
-    window.requestAnimationFrame(() => lastDetailTriggerRef.current?.focus());
+    restoreFocus(lastDetailTriggerRef.current);
   };
 
   const submitLookup = () => {
@@ -766,10 +784,10 @@ export function HomePage() {
               <article
                 className={`lifecycle-stage stage-${index + 1}`}
                 key={stage}
+                aria-label={`${stateLabel(API_STATE_BY_STAGE[stage])} — ${STAGE_DESCRIPTIONS[stage]}`}
               >
                 <div className="stage-node" aria-hidden="true" />
                 <div className="stage-title">
-                  <span>{STAGE_DESCRIPTIONS[stage]}</span>
                   <h2>{stateLabel(API_STATE_BY_STAGE[stage])}</h2>
                   <small>
                     {STAGE_SEAMS[stage] ??
@@ -882,7 +900,7 @@ export function HomePage() {
               <small>
                 {restaurantFault
                   ? simFaultLabel(simFaults?.restaurant, "fault armed")
-                  : `${fmt(slots?.restaurant.used)} / ${fmt(slots?.restaurant.cap)} slots`}
+                  : `${fmt(slots?.restaurant.used)} / ${fmt(slots?.restaurant.cap)} worker slots`}
               </small>
             </button>
             <button
@@ -914,7 +932,7 @@ export function HomePage() {
               <small>
                 {deliveryFault
                   ? simFaultLabel(simFaults?.courier, "fault armed")
-                  : `${fmt(slots?.courier.used)} / ${fmt(slots?.courier.cap)} slots`}
+                  : `${fmt(slots?.courier.used)} / ${fmt(slots?.courier.cap)} worker slots`}
               </small>
             </button>
           </div>
@@ -1031,6 +1049,10 @@ function DetailsDrawer({
   redriveStatus: string | null;
   onClose: () => void;
 }) {
+  const drawerRef = useRef<HTMLElement>(null);
+
+  useFocusTrap(drawerRef, true);
+
   const title =
     panel.kind === "order"
       ? `Order ${order ? displayCode(order.id) : "details"}`
@@ -1043,7 +1065,14 @@ function DetailsDrawer({
           : "Worker system";
 
   return (
-    <aside className="side-panel details-drawer" aria-label={title}>
+    <aside
+      className="side-panel details-drawer"
+      aria-label={title}
+      role="dialog"
+      aria-modal="true"
+      tabIndex={-1}
+      ref={drawerRef}
+    >
       <div className="panel-heading">
         <div>
           <p className="eyebrow">Contextual details</p>
@@ -1054,7 +1083,6 @@ function DetailsDrawer({
           type="button"
           onClick={onClose}
           aria-label="Close details"
-          autoFocus
         >
           ×
         </button>
@@ -1302,7 +1330,7 @@ function ZoneDetails({
       <div className="drawer-metrics">
         <Metric label="Requests" value={fmt(lane?.requests_per_min)} detail="per minute" />
         <Metric label="P95 latency" value={`${fmt(lane?.latency_p95_s)}s`} detail={`P50 ${fmt(lane?.latency_p50_s)}s`} />
-        <Metric label="Capacity" value={`${fmt(slots?.used)} / ${fmt(slots?.cap)}`} detail={`${fmt(slots?.per_worker_cap)} per worker`} />
+        <Metric label="Worker outbound slots" value={`${fmt(slots?.used)} / ${fmt(slots?.cap)}`} detail={`${fmt(slots?.per_worker_cap)} per worker · not fleet size`} />
         <Metric label="Backlog" value={fmt(backlog)} detail="pending + leased" />
       </div>
       <section className="drawer-section">
