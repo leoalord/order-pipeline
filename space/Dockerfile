@@ -5,7 +5,9 @@
 FROM python:3.12-slim-bookworm AS python-deps
 COPY --from=ghcr.io/astral-sh/uv:0.10.2 /uv /uvx /bin/
 
-WORKDIR /app
+# Same path as the runtime image. uv writes absolute shebangs into .venv/bin;
+# copying /app → /home/user/app would leave alembic/uvicorn/worker unrunnable.
+WORKDIR /home/user/app
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_LINK_MODE=copy
 
@@ -37,7 +39,7 @@ RUN apt-get update \
     && mkdir -p /home/user/app /home/user/data /tmp/nginx \
     && chown -R user:user /home/user /tmp/nginx
 
-COPY --from=python-deps --chown=user:user /app /home/user/app
+COPY --from=python-deps --chown=user:user /home/user/app /home/user/app
 COPY --from=dashboard --chown=user:user /dashboard/dist /home/user/app/dashboard/dist
 COPY --chown=user:user space/start.sh space/nginx.conf /home/user/app/space/
 
