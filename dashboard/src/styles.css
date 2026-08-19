@@ -251,7 +251,7 @@ button:disabled {
   border-radius: 10px;
   background: rgb(17 23 34 / 78%);
   display: grid;
-  grid-template-columns: minmax(150px, 0.65fr) minmax(300px, 1.8fr) minmax(230px, 0.8fr);
+  grid-template-columns: minmax(140px, 0.55fr) minmax(240px, 1.4fr) minmax(330px, 1fr);
   align-items: center;
   gap: 18px;
 }
@@ -314,8 +314,9 @@ button:disabled {
   color: var(--muted-strong);
   font-size: 11px;
   letter-spacing: 0.04em;
+  line-height: 1.2;
   text-transform: uppercase;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .fact-detail {
