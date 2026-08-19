@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
@@ -31,6 +32,38 @@ from order_pipeline.sim.core import (
 from order_pipeline.sim.drop import DroppedResponse
 from order_pipeline.sim.faults import FaultState
 from order_pipeline.sim.ledger import Effect, EffectLedger
+
+
+class KitchenCapacityCommand(BaseModel):
+    """Live pan-count change used by the presenter controls."""
+
+    kitchen_pans: int = Field(ge=1, le=64)
+
+
+class KitchenCapacity:
+    """Thread-safe, process-local kitchen pan capacity."""
+
+    def __init__(self, kitchen_pans: int) -> None:
+        self.boot_kitchen_pans = kitchen_pans
+        self._kitchen_pans = kitchen_pans
+        self._lock = threading.Lock()
+
+    def get(self) -> int:
+        with self._lock:
+            return self._kitchen_pans
+
+    def set(self, kitchen_pans: int) -> int:
+        with self._lock:
+            self._kitchen_pans = kitchen_pans
+            return self._kitchen_pans
+
+    def view(self) -> dict[str, int]:
+        return {
+            "kitchen_pans": self.get(),
+            "boot_kitchen_pans": self.boot_kitchen_pans,
+            "min_kitchen_pans": 1,
+            "max_kitchen_pans": 64,
+        }
 
 
 class StockPost(BaseModel):
@@ -101,6 +134,7 @@ def build_app(
     extra_item_s = settings.extra_item_s
     ledger = EffectLedger(settings.ledger_path)
     stock = MenuStock(ledger, default=settings.stock_default)
+    capacity = KitchenCapacity(settings.kitchen_pans)
 
     def quote(body: dict[str, Any], now: datetime) -> Quote:
         return quote_accept(
@@ -108,7 +142,7 @@ def build_app(
             now,
             cook_s=cook_s,
             extra_item_s=extra_item_s,
-            pans=settings.kitchen_pans,
+            pans=capacity.get(),
             busy_multiple=settings.busy_multiple,
             rail_fuse=settings.rail_fuse,
             occupancy=_occupancy(ledger, now, cook_s=cook_s, extra_item_s=extra_item_s),
@@ -181,6 +215,16 @@ def build_app(
         commit_new_accept=commit_stock,
     )
     app = create_sim_app(title="Restaurant sim", core=core, allow_fail_void=True)
+
+    @app.get("/admin/capacity")
+    def get_capacity() -> dict[str, int]:
+        return capacity.view()
+
+    @app.post("/admin/capacity")
+    def set_capacity(command: KitchenCapacityCommand) -> dict[str, int]:
+        with core.accept_lock:
+            capacity.set(command.kitchen_pans)
+            return capacity.view()
 
     @app.get("/admin/stock")
     def get_stock() -> dict[str, int]:

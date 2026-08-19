@@ -93,6 +93,10 @@ def test_dashboard_source_has_unified_lifecycle_and_evidence() -> None:
     assert "orphaned_tickets" in snapshot
     assert "fetchLoadgenStatus" in home
     assert "fetchSimFaults" in home
+    assert "fetchMenuStock" in home
+    assert "Kitchen inventory" in home
+    assert "kitchen-inventory" in home
+    assert 'fetch("/rsim/admin/stock"' in snapshot
     assert "simFaultActive(simFaults?.restaurant)" in home
     assert "simFaultActive(simFaults?.courier)" in home
     assert "targeted confirms" in home
@@ -146,6 +150,7 @@ def test_presenter_rail_posts_existing_scenarios_on_unified_surface() -> None:
         "/rsim/admin/faults",
         "/csim/admin/faults",
         "/csim/admin/capacity",
+        "/rsim/admin/capacity",
         "/loadgen/beat/cancel-race",
         "/loadgen/beat/place",
         "/rsim/admin/stock",
@@ -159,6 +164,8 @@ def test_presenter_rail_posts_existing_scenarios_on_unified_surface() -> None:
         "Courier failure",
         "Courier capacity",
         "Fleet capacity",
+        "Cooking capacity",
+        "Meals at once",
         "parked courier jobs",
         "Redrive ${parkedCourierJobs.length} parked courier jobs",
         "Reset demo",
@@ -169,6 +176,7 @@ def test_presenter_rail_posts_existing_scenarios_on_unified_surface() -> None:
         "Fail void",
         "Out of stock",
         "Restore stock",
+        "Kitchen inventory",
         "Redrive",
     ):
         assert label in control

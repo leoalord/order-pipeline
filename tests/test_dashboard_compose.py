@@ -121,6 +121,7 @@ def test_dashboard_serves_spa_and_control_load_group() -> None:
     assert "Fail void" in control_src.text
     assert "Out of stock" in control_src.text
     assert "Restore stock" in control_src.text
+    assert "Kitchen inventory" in control_src.text
     assert "/loadgen/beat/place" in control_src.text
     assert "/rsim/admin/stock" in control_src.text
     assert "kill" not in control_src.text.lower()
@@ -144,6 +145,9 @@ def test_dashboard_proxy_snapshot_and_reserved_sim_paths() -> None:
     capacity = _http("GET", f"{DASHBOARD_URL}/csim/admin/capacity")
     assert capacity.status_code == 200, capacity.text
     assert capacity.json()["fleet_size"] >= 1
+    pans = _http("GET", f"{DASHBOARD_URL}/rsim/admin/capacity")
+    assert pans.status_code == 200, pans.text
+    assert pans.json()["kitchen_pans"] >= 1
     compose = (REPO_ROOT / "docker-compose.yml").read_text()
     assert "LOADGEN_PROXY_TARGET: http://loadgen:8090" in compose
     assert "\n  loadgen:" in compose

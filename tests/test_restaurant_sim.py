@@ -135,6 +135,49 @@ def test_second_ticket_queues_when_the_only_pan_is_busy(
         assert second_start == first_eta
 
 
+def test_live_capacity_increase_adds_a_pan_for_new_accepts(
+    tmp_path: Path, clock: MutableClock
+) -> None:
+    settings = RSIMSettings(
+        ledger_path=tmp_path / "live-pans.sqlite",
+        flaky_5xx_pct=0.0,
+        flaky_drop_pct=0.0,
+        kitchen_pans=1,
+    )
+    app = build_app(settings, now_fn=clock, blackout_hang_s=0.0)
+    with TestClient(app) as client:
+        initial = client.get("/admin/capacity")
+        assert initial.status_code == 200
+        assert initial.json() == {
+            "kitchen_pans": 1,
+            "boot_kitchen_pans": 1,
+            "min_kitchen_pans": 1,
+            "max_kitchen_pans": 64,
+        }
+
+        first = _accept(client, ["burrito"], f"pans-1-{uuid.uuid4()}")
+        assert first.status_code == 200, first.text
+        assert first.json()["status"] == "cooking"
+
+        scaled = client.post("/admin/capacity", json={"kitchen_pans": 2})
+        assert scaled.status_code == 200, scaled.text
+        assert scaled.json()["kitchen_pans"] == 2
+        assert scaled.json()["boot_kitchen_pans"] == 1
+
+        second = _accept(client, ["burrito"], f"pans-2-{uuid.uuid4()}")
+        assert second.status_code == 200, second.text
+        assert second.json()["status"] == "cooking"
+        assert second.json()["service_started_at"] == second.json()["accepted_at"]
+
+
+def test_live_capacity_rejects_values_outside_guardrails(client: TestClient) -> None:
+    too_small = client.post("/admin/capacity", json={"kitchen_pans": 0})
+    too_large = client.post("/admin/capacity", json={"kitchen_pans": 65})
+    assert too_small.status_code == 422
+    assert too_large.status_code == 422
+    assert client.get("/admin/capacity").json()["kitchen_pans"] == 20
+
+
 def test_concurrent_accepts_reserve_no_more_than_twenty_pans(
     tmp_path: Path, clock: MutableClock
 ) -> None:
