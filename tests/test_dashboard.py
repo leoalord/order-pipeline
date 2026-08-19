@@ -58,6 +58,8 @@ def test_dashboard_source_has_unified_lifecycle_and_evidence() -> None:
     assert "ticket-stack" in home
     assert "displayCode" in home
     assert "terminal-branches" in home
+    assert "branch-spine" not in home
+    assert "Independent systems demonstration" not in home
     assert "orders: OrderSummary[]" in home
     assert "orders: OrderSummary[]" in snapshot
     assert "accepted — queued for preparation" in snapshot
