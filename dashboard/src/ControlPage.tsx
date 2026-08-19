@@ -4,7 +4,9 @@ import { Navigate } from "react-router-dom";
 import { useFocusTrap } from "./focusTrap";
 import {
   redriveWorkItem,
+  stockLine,
   type LoadgenStatus,
+  type MenuStock,
   type ParkedRow,
 } from "./snapshot";
 
@@ -26,6 +28,7 @@ type PresenterRailProps = {
   activeScenario: ScenarioId;
   courierFaultActive: boolean;
   loadgen: LoadgenStatus | null;
+  menuStock: MenuStock | null;
   parkedCourierJobs: ParkedRow[];
   readyOrders: number;
   onClose: () => void;
@@ -38,6 +41,13 @@ type CourierCapacity = {
   boot_fleet_size: number;
   min_fleet_size: number;
   max_fleet_size: number;
+};
+
+type KitchenCapacity = {
+  kitchen_pans: number;
+  boot_kitchen_pans: number;
+  min_kitchen_pans: number;
+  max_kitchen_pans: number;
 };
 
 async function post(
@@ -69,6 +79,7 @@ export function PresenterRail({
   activeScenario,
   courierFaultActive,
   loadgen,
+  menuStock,
   parkedCourierJobs,
   readyOrders,
   onClose,
@@ -82,6 +93,8 @@ export function PresenterRail({
   const [notice, setNotice] = useState<string | null>(null);
   const [capacity, setCapacity] = useState<CourierCapacity | null>(null);
   const [capacityDraft, setCapacityDraft] = useState(8);
+  const [kitchen, setKitchen] = useState<KitchenCapacity | null>(null);
+  const [kitchenDraft, setKitchenDraft] = useState(20);
   const railRef = useRef<HTMLElement>(null);
 
   useFocusTrap(railRef, true);
@@ -90,19 +103,26 @@ export function PresenterRail({
     const controller = new AbortController();
     const loadCapacity = async () => {
       try {
-        const response = await fetch("/csim/admin/capacity", {
-          signal: controller.signal,
-        });
-        if (!response.ok) {
-          throw new Error(`GET /csim/admin/capacity ${response.status}`);
+        const [courierResponse, kitchenResponse] = await Promise.all([
+          fetch("/csim/admin/capacity", { signal: controller.signal }),
+          fetch("/rsim/admin/capacity", { signal: controller.signal }),
+        ]);
+        if (!courierResponse.ok) {
+          throw new Error(`GET /csim/admin/capacity ${courierResponse.status}`);
         }
-        const body = (await response.json()) as CourierCapacity;
-        setCapacity(body);
-        setCapacityDraft(body.fleet_size);
+        if (!kitchenResponse.ok) {
+          throw new Error(`GET /rsim/admin/capacity ${kitchenResponse.status}`);
+        }
+        const courierBody = (await courierResponse.json()) as CourierCapacity;
+        const kitchenBody = (await kitchenResponse.json()) as KitchenCapacity;
+        setCapacity(courierBody);
+        setCapacityDraft(courierBody.fleet_size);
+        setKitchen(kitchenBody);
+        setKitchenDraft(kitchenBody.kitchen_pans);
       } catch (err) {
         if (!controller.signal.aborted) {
           setError(
-            err instanceof Error ? err.message : "Courier capacity unavailable",
+            err instanceof Error ? err.message : "Capacity controls unavailable",
           );
         }
       }
@@ -153,6 +173,30 @@ export function PresenterRail({
       return;
     }
     void run("/loadgen/scenario/rush", { mult: value }, "rush");
+  };
+
+  const applyKitchenCapacity = async () => {
+    const path = "/rsim/admin/capacity";
+    setBusy(path);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await post(path, { kitchen_pans: kitchenDraft });
+      setLast(result);
+      if (result.status < 200 || result.status >= 300) {
+        throw new Error(
+          `${path} returned ${result.status}: ${result.body.slice(0, 160)}`,
+        );
+      }
+      const body = JSON.parse(result.body) as KitchenCapacity;
+      setKitchen(body);
+      setKitchenDraft(body.kitchen_pans);
+      onMutation();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Capacity change failed");
+    } finally {
+      setBusy(null);
+    }
   };
 
   const applyCourierCapacity = async () => {
@@ -221,6 +265,10 @@ export function PresenterRail({
       ["/loadgen/stop", undefined],
       ["/rsim/admin/faults", { mode: "clear" }],
       ["/csim/admin/faults", { mode: "clear" }],
+      [
+        "/rsim/admin/capacity",
+        { kitchen_pans: kitchen?.boot_kitchen_pans ?? 20 },
+      ],
       [
         "/csim/admin/capacity",
         { fleet_size: capacity?.boot_fleet_size ?? 8 },
@@ -304,7 +352,7 @@ export function PresenterRail({
           <small>
             {calibrated
               ? "Recalibrate after changing the worker or dependency topology."
-              : "Normal runs on the fallback. Rush needs a measured H, or its peak can land below this host's capacity."}
+              : "Normal runs on the fallback. Rush needs a measured H. Calibrate finds the fastest rate that keeps up before kitchen, courier, or the door say busy."}
           </small>
         </div>
         <button
@@ -501,6 +549,51 @@ export function PresenterRail({
         </section>
       </div>
 
+      <section className="capacity-card kitchen" aria-label="Cooking capacity">
+        <div className="capacity-heading">
+          <div>
+            <span>Cooking capacity</span>
+            <strong>Meals at once · {kitchenDraft}</strong>
+          </div>
+          <output aria-live="polite">
+            {kitchen ? `Live ${kitchen.kitchen_pans}` : "Connecting…"}
+          </output>
+        </div>
+        <label htmlFor="kitchen-capacity">
+          <span>Fewer</span>
+          <input
+            id="kitchen-capacity"
+            type="range"
+            min={kitchen?.min_kitchen_pans ?? 1}
+            max={kitchen?.max_kitchen_pans ?? 64}
+            step={1}
+            value={kitchenDraft}
+            aria-label="Meal cooking capacity"
+            aria-valuetext={`${kitchenDraft} meals at once`}
+            disabled={disabled || kitchen === null}
+            onChange={(event) => setKitchenDraft(Number(event.target.value))}
+          />
+          <span>More</span>
+        </label>
+        <p>
+          How many meals the kitchen can prepare at the same time. New
+          confirms use the new limit; tickets already cooking keep their quote.
+        </p>
+        <div className="capacity-actions">
+          <button
+            type="button"
+            disabled={
+              disabled || kitchen === null || kitchenDraft === kitchen.kitchen_pans
+            }
+            onClick={() => void applyKitchenCapacity()}
+          >
+            {busy === "/rsim/admin/capacity"
+              ? "Applying…"
+              : `Apply ${kitchenDraft} meals at once`}
+          </button>
+        </div>
+      </section>
+
       <section className="capacity-card" aria-label="Courier capacity">
         <div className="capacity-heading">
           <div>
@@ -569,6 +662,14 @@ export function PresenterRail({
 
       <details className="rail-setup">
         <summary>Setup & bonus beats</summary>
+        <p
+          className={
+            menuStock?.burrito === 0 ? "stock-line stock-empty" : "stock-line"
+          }
+        >
+          Kitchen inventory ·{" "}
+          {menuStock ? stockLine(menuStock) : "unavailable"}
+        </p>
         <div className="button-pair">
           <button
             type="button"

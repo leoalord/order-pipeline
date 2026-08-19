@@ -14,13 +14,16 @@ import {
 import { useFocusTrap } from "./focusTrap";
 import {
   fetchLoadgenStatus,
+  fetchMenuStock,
   fetchSimFaults,
   fetchSnapshot,
+  MENU_ITEMS,
   POLL_MS,
   redriveWorkItem,
   STAGE_LABELS,
   STAGE_SEAMS,
   type LoadgenStatus,
+  type MenuStock,
   type OrderSummary,
   type SimHttpLane,
   type SimFaultStatus,
@@ -387,6 +390,7 @@ export function HomePage() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [loadgen, setLoadgen] = useState<LoadgenStatus | null>(null);
   const [simFaults, setSimFaults] = useState<SimFaults | null>(null);
+  const [menuStock, setMenuStock] = useState<MenuStock | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [focusedOrderId, setFocusedOrderId] = useState<string | null>(null);
   const [pinnedOrderId, setPinnedOrderId] = useState<string | null>(null);
@@ -426,6 +430,7 @@ export function HomePage() {
       let activeCohort = cohortIdRef.current ?? undefined;
       let loadgenWarning: string | null = null;
       let faultWarning: string | null = null;
+      let stockWarning: string | null = null;
       try {
         try {
           const status = await fetchLoadgenStatus(controller.signal);
@@ -447,6 +452,15 @@ export function HomePage() {
               ? `${err.message}; showing the last known dependency state`
               : "dependency state unavailable; showing the last known state";
         }
+        try {
+          setMenuStock(await fetchMenuStock(controller.signal));
+        } catch (err) {
+          if (controller.signal.aborted) return;
+          stockWarning =
+            err instanceof Error
+              ? `${err.message}; kitchen inventory unavailable`
+              : "kitchen inventory unavailable";
+        }
         // Ask for the followed order by id so it stays in the bounded
         // projection even after it ages out of the recent window.
         const followId = focusedOrderId ?? pinnedOrderIdRef.current;
@@ -460,7 +474,9 @@ export function HomePage() {
           setSnapshot(body);
           cohortIdRef.current = body.cohort_id;
           setError(
-            [loadgenWarning, faultWarning].filter(Boolean).join("; ") || null,
+            [loadgenWarning, faultWarning, stockWarning]
+              .filter(Boolean)
+              .join("; ") || null,
           );
         }
       } catch (err) {
@@ -932,6 +948,34 @@ export function HomePage() {
                   : `${fmt(slots?.courier.used)} / ${fmt(slots?.courier.cap)} worker slots`}
               </small>
             </button>
+            <button
+              type="button"
+              className={
+                menuStock?.burrito === 0
+                  ? "kitchen-inventory stock-empty"
+                  : "kitchen-inventory"
+              }
+              onClick={(event) =>
+                openDetail(
+                  { kind: "zone", zone: "restaurant" },
+                  event.currentTarget,
+                )
+              }
+            >
+              <span>Kitchen inventory</span>
+              <strong>
+                {menuStock
+                  ? MENU_ITEMS.map((item) => (
+                      <i
+                        key={item}
+                        className={menuStock[item] === 0 ? "stock-empty" : undefined}
+                      >
+                        {item} {fmt(menuStock[item])}
+                      </i>
+                    ))
+                  : "unavailable"}
+              </strong>
+            </button>
           </div>
 
           <button
@@ -977,6 +1021,7 @@ export function HomePage() {
             activeScenario={activeScenario}
             courierFaultActive={deliveryFault}
             loadgen={loadgen}
+            menuStock={menuStock}
             readyOrders={stageCounts?.ready ?? 0}
             parkedCourierJobs={parked.filter((row) =>
               ["dispatch", "poll_ride"].includes(row.work_type),
@@ -1001,6 +1046,7 @@ export function HomePage() {
             snapshot={snapshot}
             restaurantFault={restaurantFault}
             courierFault={deliveryFault}
+            menuStock={menuStock}
             order={focusedOrder}
             trace={trace}
             lookupId={lookupId}
@@ -1022,6 +1068,7 @@ function DetailsDrawer({
   snapshot,
   restaurantFault,
   courierFault,
+  menuStock,
   order,
   trace,
   lookupId,
@@ -1036,6 +1083,7 @@ function DetailsDrawer({
   snapshot: Snapshot | null;
   restaurantFault: boolean;
   courierFault: boolean;
+  menuStock: MenuStock | null;
   order: OrderSummary | null;
   trace: Snapshot["trace"];
   lookupId: string;
@@ -1105,6 +1153,7 @@ function DetailsDrawer({
           zone={panel.zone}
           snapshot={snapshot}
           faultArmed={panel.zone === "restaurant" ? restaurantFault : courierFault}
+          menuStock={panel.zone === "restaurant" ? menuStock : null}
         />
       ) : null}
       {panel.kind === "correctness" ? (
@@ -1290,10 +1339,12 @@ function ZoneDetails({
   zone,
   snapshot,
   faultArmed,
+  menuStock,
 }: {
   zone: "restaurant" | "delivery";
   snapshot: Snapshot | null;
   faultArmed: boolean;
+  menuStock: MenuStock | null;
 }) {
   const lane =
     zone === "restaurant"
@@ -1330,6 +1381,21 @@ function ZoneDetails({
         <Metric label="Worker outbound slots" value={`${fmt(slots?.used)} / ${fmt(slots?.cap)}`} detail={`${fmt(slots?.per_worker_cap)} per worker · not fleet size`} />
         <Metric label="Backlog" value={fmt(backlog)} detail="pending + leased" />
       </div>
+      {zone === "restaurant" ? (
+        <section className="drawer-section">
+          <h3>Kitchen inventory</h3>
+          <dl className="detail-list">
+            {MENU_ITEMS.map((item) => (
+              <div key={item}>
+                <dt>{item}</dt>
+                <dd className={(menuStock?.[item] ?? 1) === 0 ? "stock-empty" : undefined}>
+                  {fmt(menuStock?.[item])}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+      ) : null}
       <section className="drawer-section">
         <h3>Dependency signals · last 60 seconds</h3>
         <dl className="detail-list">

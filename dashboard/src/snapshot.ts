@@ -229,6 +229,25 @@ export async function fetchSimFaults(signal?: AbortSignal): Promise<SimFaults> {
   };
 }
 
+/** Restaurant menu counters. Same ids as the sim; not a GET /snapshot field. */
+export const MENU_ITEMS = ["chips", "taco", "burrito"] as const;
+
+export type MenuItemId = (typeof MENU_ITEMS)[number];
+
+export type MenuStock = Record<MenuItemId, number>;
+
+export async function fetchMenuStock(signal?: AbortSignal): Promise<MenuStock> {
+  const response = await fetch("/rsim/admin/stock", { signal });
+  if (!response.ok) {
+    throw new Error(`GET /rsim/admin/stock ${response.status}`);
+  }
+  return (await response.json()) as MenuStock;
+}
+
+export function stockLine(stock: MenuStock): string {
+  return MENU_ITEMS.map((item) => `${item} ${stock[item]}`).join(" · ");
+}
+
 export function snapshotUrl(opts?: { cohortId?: string; orderId?: string }): string {
   const path = apiPath("/snapshot");
   const params = new URLSearchParams();

@@ -14,6 +14,10 @@ from order_pipeline.loadgen.carts import pick_cart
 from order_pipeline.loadgen.client import PipelineClient
 from order_pipeline.loadgen.settings import LoadgenSettings
 
+# Confirm / dispatch are waiting to start kitchen or courier work. poll_cook
+# and poll_ride are in-service (cooking or en route) and must not cap H.
+WAITING_WORK_TYPES = ("confirm", "dispatch")
+
 
 def backlog_total(snapshot: dict[str, Any]) -> int:
     raw = snapshot.get("backlog")
@@ -21,6 +25,19 @@ def backlog_total(snapshot: dict[str, Any]) -> int:
         return 0
     total = 0
     for value in raw.values():
+        if isinstance(value, int) and not isinstance(value, bool):
+            total += value
+    return total
+
+
+def waiting_backlog(snapshot: dict[str, Any]) -> int:
+    """Work still waiting for a kitchen or courier slot, not in-service polls."""
+    raw = snapshot.get("backlog")
+    if not isinstance(raw, dict):
+        return 0
+    total = 0
+    for name in WAITING_WORK_TYPES:
+        value = raw.get(name, 0)
         if isinstance(value, int) and not isinstance(value, bool):
             total += value
     return total
@@ -67,11 +84,12 @@ def no_progress_count(snapshot: dict[str, Any]) -> int:
 
 
 def step_is_flat(*, start_backlog: int, end_backlog: int) -> bool:
-    """H is the highest rate whose backlog does not climb during the step.
+    """H is the highest rate whose waiting queue does not climb during the step.
 
-    A short step starting near empty adds normal in-flight inventory (arrival ×
-    dwell), so a small absolute fill-in is allowed only at low WIP. Once the
-    pipeline is populated, flat means no backlog growth.
+    Callers pass confirm+dispatch only. Cooking and on-bike polls are healthy
+    in-flight work; a short step may add a few waiting tickets while workers
+    catch up. Once that waiting queue is already populated, flat means no
+    further growth. Kitchen/courier 429s are the capacity brake.
     """
     slack = 4 if start_backlog <= 4 else 0
     return end_backlog <= start_backlog + slack
@@ -250,7 +268,7 @@ class OpenLoopDriver:
         factor: float | None = None,
         max_rps: float | None = None,
     ) -> dict[str, Any]:
-        """Stepped ramp. H = highest flat-backlog step. Reports H + 429 mix."""
+        """Stepped ramp. H = highest rate that keeps up (waiting queue flat, no new 429s)."""
         step = self.settings.calibrate_step_s if step_s is None else step_s
         rps = self.settings.calibrate_start_rps if start_rps is None else start_rps
         grow = self.settings.calibrate_factor if factor is None else factor
@@ -272,8 +290,8 @@ class OpenLoopDriver:
             first = await self.client.snapshot(self.cohort_id)
             await asyncio.sleep(max(0.0, step - warmup))
             last = await self.client.snapshot(self.cohort_id)
-            start_backlog = backlog_total(first)
-            end_backlog = backlog_total(last)
+            start_backlog = waiting_backlog(first)
+            end_backlog = waiting_backlog(last)
             first_mix = http_429s_from_snapshot(first)
             mix = http_429s_from_snapshot(last)
             mix_delta = {name: max(0, mix[name] - first_mix[name]) for name in mix}

@@ -869,6 +869,49 @@ button:disabled {
   border-top: 2px solid var(--red);
 }
 
+.kitchen-inventory {
+  grid-column: 1 / -1;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.kitchen-inventory > span {
+  color: var(--muted-strong);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.kitchen-inventory > strong {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 12px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+}
+
+.kitchen-inventory > strong > i {
+  font-style: normal;
+}
+
+.kitchen-inventory.stock-empty,
+.kitchen-inventory .stock-empty {
+  color: var(--amber);
+}
+
 .correctness-proof {
   padding: 11px;
   cursor: pointer;
@@ -1113,6 +1156,12 @@ button:disabled {
   border-radius: 11px;
   background: rgb(13 45 38 / 56%);
   box-shadow: inset 3px 0 var(--green);
+}
+
+.capacity-card.kitchen {
+  border-color: rgb(179 254 247 / 30%);
+  background: rgb(12 28 45 / 56%);
+  box-shadow: inset 3px 0 var(--aqua);
 }
 
 .capacity-heading,
@@ -1363,6 +1412,19 @@ button:disabled {
   color: var(--muted-strong);
   cursor: pointer;
   font-size: 12px;
+  font-weight: 750;
+}
+
+.rail-setup .stock-line {
+  margin: 8px 0 0;
+  color: var(--muted-strong);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.rail-setup .stock-line.stock-empty,
+.detail-list .stock-empty {
+  color: var(--amber);
   font-weight: 750;
 }
 

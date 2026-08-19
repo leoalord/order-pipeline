@@ -17,6 +17,7 @@ from order_pipeline.loadgen.driver import (
     backlog_total,
     http_429s_from_snapshot,
     step_is_flat,
+    waiting_backlog,
 )
 from order_pipeline.loadgen.settings import LoadgenSettings
 from order_pipeline.menu import MENU_ITEM_IDS
@@ -81,6 +82,7 @@ def test_step_flatness_and_snapshot_helpers() -> None:
         "http_429s": {"door": 1, "kitchen": 4, "courier": 2},
     }
     assert backlog_total(snap) == 6
+    assert waiting_backlog(snap) == 3
     assert http_429s_from_snapshot(snap) == {"door": 1, "kitchen": 4, "courier": 2}
 
 
@@ -296,6 +298,45 @@ def test_calibrate_keeps_probing_after_backlog_growth_until_downstream_429() -> 
     assert body["steps"][1]["flat"] is False
     assert body["steps"][2]["http_429s_delta"]["kitchen"] == 1
     assert body["downstream_429_observed"] is True
+
+
+def test_calibrate_ignores_in_service_cook_and_ride_polls() -> None:
+    """Growing poll_cook / poll_ride is healthy dwell, not a waiting queue."""
+
+    class CookingPipeline(FakePipeline):
+        async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
+            del cohort_id
+            self.snapshots += 1
+            cook = 0 if self.snapshots == 1 else 40
+            return {
+                "backlog": {
+                    "confirm": 0,
+                    "poll_cook": cook,
+                    "dispatch": 0,
+                    "poll_ride": cook,
+                },
+                "oldest_open": {"age_s": 20.0, "stage": "being prepared"},
+                "http_429s": {"door": 0, "kitchen": 0, "courier": 0},
+            }
+
+    fake = CookingPipeline()
+    driver = OpenLoopDriver(LoadgenSettings(), fake)
+
+    async def run() -> dict[str, Any]:
+        await driver.start()
+        result = await driver.calibrate(
+            step_s=0.05,
+            start_rps=0.5,
+            factor=2.0,
+            max_rps=2.0,
+        )
+        await driver.aclose()
+        return result
+
+    body = asyncio.run(run())
+    assert body["h"] == 2.0
+    assert all(step["backlog_flat"] for step in body["steps"])
+    assert body["downstream_429_observed"] is False
 
 
 def test_calibrate_door_first_ignores_earlier_cumulative_429s() -> None:
