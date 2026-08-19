@@ -673,22 +673,20 @@ export function HomePage() {
             <span className="brand-mark" aria-hidden="true">OP</span>
             <div>
               <strong>Order flow studio</strong>
-              <span>Independent systems demonstration</span>
+              <button
+                ref={presenterButtonRef}
+                className="presenter-button"
+                type="button"
+                onClick={openRail}
+                aria-expanded={railOpen}
+                aria-controls="presenter-rail"
+              >
+                <span aria-hidden="true">☷</span>
+                Presenter controls
+                <i aria-hidden="true">›</i>
+              </button>
             </div>
           </div>
-
-          <button
-            ref={presenterButtonRef}
-            className="presenter-button"
-            type="button"
-            onClick={openRail}
-            aria-expanded={railOpen}
-            aria-controls="presenter-rail"
-          >
-            <span aria-hidden="true">☷</span>
-            Presenter controls
-            <i aria-hidden="true">›</i>
-          </button>
         </div>
 
         <div className="live-context" aria-label="Live demo context">
@@ -812,7 +810,6 @@ export function HomePage() {
           </div>
 
           <div className="terminal-branches" aria-label="Terminal branches">
-            <div className="branch-spine" aria-hidden="true" />
             <section className="terminal-branch cancelled">
               <span className="branch-icon" aria-hidden="true">×</span>
               <div>
