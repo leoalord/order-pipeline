@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
 from order_pipeline.models import Attempt, Order, WorkItem
+from order_pipeline.worker.log import log_worker_event
 from order_pipeline.worker.plugin import ClaimedWork
 
 
@@ -68,6 +69,7 @@ def claim_next(
     if order is None:
         raise RuntimeError(f"work item {item.id} points at a missing order")
 
+    reclaiming = item.status == "leased"
     item.status = "leased"
     item.lease_owner = worker_id
     item.lease_until = now + timedelta(seconds=lease_s)
@@ -83,7 +85,7 @@ def claim_next(
     session.add(attempt)
     session.flush()
 
-    return ClaimedWork(
+    claimed = ClaimedWork(
         work_item_id=item.id,
         order_id=item.order_id,
         work_type=item.work_type,
@@ -97,3 +99,14 @@ def claim_next(
         accepted_at=order.accepted_at,
         items=order.items,
     )
+    log_worker_event(
+        "reclaim" if reclaiming else "claim",
+        worker_id=worker_id,
+        work_item_id=claimed.work_item_id,
+        order_id=claimed.order_id,
+        work_type=claimed.work_type,
+        lease_owner=claimed.lease_owner,
+        attempt_id=claimed.attempt_id,
+        attempt_count=claimed.attempt_count,
+    )
+    return claimed

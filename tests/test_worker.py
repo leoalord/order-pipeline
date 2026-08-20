@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
 import os
 import random
+import threading
+import time
 import uuid
+import warnings
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import create_engine, select
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from order_pipeline.cancel import CancelOutcome, cancel_order
@@ -37,6 +43,7 @@ from order_pipeline.worker.finalize import (
     PARK_REASON_GUARD_REJECTED,
     finalize_claim,
 )
+from order_pipeline.worker.health import create_health_app
 from order_pipeline.worker.http import courier_base_url
 from order_pipeline.worker.plugin import (
     ClaimedWork,
@@ -860,3 +867,398 @@ def test_courier_base_url_is_compose_wiring(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("WORKER_COURIER_BASE_URL", "http://localhost:8082")
     assert courier_base_url() == "http://localhost:8082"
     assert courier_base_url(override="http://csim:8082") == "http://csim:8082"
+
+
+def _operational_error(message: str) -> OperationalError:
+    return OperationalError("SELECT 1", {}, Exception(message))
+
+
+def test_worker_engine_validates_stale_pooled_connections() -> None:
+    """Pre-ping, and a pool big enough for every thread that can hold a connection."""
+    from order_pipeline.worker.__main__ import WORKER_DB_POOL_HEADROOM, create_worker_engine
+
+    settings = _settings()
+    engine = create_worker_engine(settings)
+    try:
+        assert getattr(engine.pool, "_pre_ping", False) is True
+        # Off-loop finalize made concurrent checkouts possible; the default
+        # 5 + 10 pool is smaller than the threads that can demand one.
+        assert engine.pool.size() == settings.finalize_workers + WORKER_DB_POOL_HEADROOM
+        assert getattr(engine.pool, "_max_overflow", None) == 0
+    finally:
+        engine.dispose()
+
+
+def test_run_survives_pool_exhaustion(caplog: pytest.LogCaptureFixture) -> None:
+    """A saturated pool raises sqlalchemy.exc.TimeoutError from claim, not OperationalError.
+
+    Before the transient tuple covered it, this exited run() -- and under
+    restart: "no" that is the replica gone for the rest of the demo.
+    """
+    engine = create_engine(
+        TEST_DATABASE_URL,
+        pool_pre_ping=True,
+        pool_size=1,
+        max_overflow=0,
+        pool_timeout=0.25,
+    )
+    worker = Worker(
+        _settings(),
+        engine,
+        # A synthetic type so this never competes for real rows with a running stack:
+        # claim still has to reach the pool, and finds nothing once it gets there.
+        handlers={"__never_claimed__": cast(WorkHandler, _never_called)},
+        worker_id="pool-exhausted",
+        idle_s=0.01,
+        rng=random.Random(0),
+    )
+    caplog.set_level(logging.WARNING, logger="order_pipeline.worker")
+
+    def _retries() -> int:
+        return sum(record.message.startswith("claim_retry") for record in caplog.records)
+
+    async def _run() -> None:
+        hold = engine.connect()  # occupy the only slot, like a stuck finalize thread
+        task = asyncio.create_task(worker.run())
+        try:
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and _retries() == 0:
+                await asyncio.sleep(0.02)
+            assert _retries() > 0, f"pool exhaustion never backed off: {caplog.text}"
+            assert not task.done(), "run() exited on a pool checkout timeout"
+            hold.close()
+            await asyncio.sleep(0.5)
+            settled = _retries()
+            await asyncio.sleep(0.5)
+            assert _retries() == settled, "claims still failing after the pool recovered"
+            assert not task.done()
+        finally:
+            hold.close()
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    try:
+        asyncio.run(_run())
+    finally:
+        engine.dispose()
+
+
+async def _never_called(_item: ClaimedWork) -> HandlerResult:
+    raise AssertionError("no work should be claimed in this test")
+
+
+def _stub_claim(work_type: str = "dispatch") -> ClaimedWork:
+    return ClaimedWork(
+        work_item_id=uuid.uuid4(),
+        order_id=uuid.uuid4(),
+        work_type=work_type,
+        idempotency_key="stub",
+        attempt_id=uuid.uuid4(),
+        lease_owner="starvation",
+        attempt_count=1,
+        payload=None,
+        order_state="ready",
+        order_version=1,
+        accepted_at=datetime.now(UTC),
+    )
+
+
+def test_stuck_finalizes_do_not_starve_the_claim_loop(db_engine: Engine) -> None:
+    """Finalize and claim must not share one thread pool.
+
+    On the shared default executor, enough stuck commits fill every thread and
+    run() blocks at its own `await` -- the replica is alive, claims nothing, and
+    the claim-retry backoff is unreachable because control never returns to it.
+    """
+    settings = _settings()
+    release = threading.Event()
+    claims = {"n": 0}
+    # More stuck finalizes than the *default* executor has threads, which is what
+    # sharing it with claim used to mean.
+    saturating = min(32, (os.cpu_count() or 1) + 4) + 4
+
+    async def handler(_item: ClaimedWork) -> HandlerResult:
+        return HandlerResult(outcome="ok")
+
+    worker = Worker(
+        settings,
+        db_engine,
+        handlers={"dispatch": cast(WorkHandler, handler)},
+        worker_id="starvation",
+        idle_s=0.01,
+    )
+
+    def blocked_finalize(_claimed: ClaimedWork, _result: HandlerResult) -> None:
+        release.wait(timeout=10.0)
+
+    def counting_claim(
+        *,
+        work_item_id: uuid.UUID | None = None,
+        work_types: tuple[str, ...] | None = None,
+    ) -> ClaimedWork | None:
+        claims["n"] += 1
+        return None  # nothing to claim; the point is that the loop keeps turning
+
+    worker.finalize = blocked_finalize  # type: ignore[assignment]
+    worker.claim = counting_claim  # type: ignore[method-assign]
+
+    async def _run() -> None:
+        stuck = [asyncio.create_task(worker.process(_stub_claim())) for _ in range(saturating)]
+        await asyncio.sleep(0.2)
+        assert not any(task.done() for task in stuck), "finalize did not actually block"
+        before = claims["n"]
+        loop_task = asyncio.create_task(worker.run())
+        try:
+            await asyncio.sleep(0.5)
+            assert claims["n"] > before, (
+                f"claim loop starved by {saturating} stuck finalizes (claims stuck at {before})"
+            )
+        finally:
+            loop_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await loop_task
+            release.set()
+            await asyncio.gather(*stuck)
+
+    try:
+        asyncio.run(_run())
+    finally:
+        release.set()
+
+
+def test_run_survives_transient_claim_error_then_processes(
+    db_engine: Engine,
+    session_factory: sessionmaker[Session],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    order_id, item_id, _ = _seed_confirm(session_factory)
+    now = datetime.now(UTC)
+    worker_id = "survive-claim"
+    with session_factory.begin() as session:
+        claimed = _claim(session, item_id, now=now, worker_id=worker_id)
+        assert claimed is not None
+
+    processed = asyncio.Event()
+    seen: list[uuid.UUID] = []
+    claims = {"n": 0}
+
+    async def handler(item: ClaimedWork) -> HandlerResult:
+        seen.append(item.work_item_id)
+        processed.set()
+        return HandlerResult(outcome="ok")
+
+    settings = _settings(dep_cap_rsim=1, dep_cap_csim=1, task_capacity=4)
+    worker = Worker(
+        settings,
+        db_engine,
+        handlers={"confirm": cast(WorkHandler, handler)},
+        worker_id=worker_id,
+        idle_s=0.01,
+        rng=random.Random(0),
+    )
+
+    def flaky_claim(
+        *,
+        work_item_id: uuid.UUID | None = None,
+        work_types: tuple[str, ...] | None = None,
+    ) -> ClaimedWork | None:
+        assert work_item_id is None
+        assert work_types is not None
+        claims["n"] += 1
+        if claims["n"] == 1:
+            raise _operational_error("server closed the connection")
+        if claims["n"] == 2:
+            return claimed
+        return None
+
+    worker.claim = flaky_claim  # type: ignore[method-assign]
+    caplog.set_level(logging.WARNING, logger="order_pipeline.worker")
+
+    async def _run() -> None:
+        task = asyncio.create_task(worker.run())
+        try:
+            await asyncio.wait_for(processed.wait(), timeout=3.0)
+            await asyncio.sleep(0.05)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    asyncio.run(_run())
+    assert seen == [item_id]
+    assert any(record.message.startswith("claim_retry") for record in caplog.records)
+    with session_factory() as session:
+        item = session.get(WorkItem, item_id)
+        assert item is not None
+        assert item.status == "completed"
+        hold_unclaimable(session, order_id)
+        session.commit()
+
+
+def test_finalize_failure_releases_capacity_is_observed_and_reclaimable(
+    db_engine: Engine,
+    session_factory: sessionmaker[Session],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    order_id, item_id, stored_key = _seed_confirm(session_factory)
+    now = datetime.now(UTC)
+    worker_id = "finalize-boom"
+    with session_factory.begin() as session:
+        claimed = _claim(session, item_id, now=now, worker_id=worker_id)
+        assert claimed is not None
+        first_attempt_id = claimed.attempt_id
+
+    settings = _settings(dep_cap_rsim=1, dep_cap_csim=1, task_capacity=4)
+    caps = DepCaps(settings)
+    registered = ("confirm", "dispatch")
+    idle_claims = {"n": 0}
+
+    async def handler(_item: ClaimedWork) -> HandlerResult:
+        return HandlerResult(outcome="ok")
+
+    worker = Worker(
+        settings,
+        db_engine,
+        handlers={"confirm": cast(WorkHandler, handler)},
+        caps=caps,
+        worker_id=worker_id,
+        idle_s=0.01,
+        rng=random.Random(0),
+    )
+
+    def boom_finalize(_claimed: ClaimedWork, _result: HandlerResult) -> None:
+        raise _operational_error("could not commit")
+
+    def claim_once(
+        *,
+        work_item_id: uuid.UUID | None = None,
+        work_types: tuple[str, ...] | None = None,
+    ) -> ClaimedWork | None:
+        assert work_item_id is None
+        assert work_types is not None
+        if idle_claims["n"] == 0:
+            idle_claims["n"] = 1
+            return claimed
+        idle_claims["n"] += 1
+        return None
+
+    worker.finalize = boom_finalize  # type: ignore[assignment]
+    worker.claim = claim_once  # type: ignore[method-assign]
+    caplog.set_level(logging.ERROR, logger="order_pipeline.worker")
+
+    async def _run() -> None:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            task = asyncio.create_task(worker.run())
+            try:
+                deadline = time.monotonic() + 3.0
+                while time.monotonic() < deadline:
+                    observed = any(
+                        record.message.startswith("process_failed")
+                        and str(item_id) in record.message
+                        and str(order_id) in record.message
+                        and worker_id in record.message
+                        for record in caplog.records
+                    )
+                    if observed and idle_claims["n"] > 1:
+                        break
+                    await asyncio.sleep(0.02)
+                else:
+                    pytest.fail(f"finalize failure was not observed: {caplog.text}")
+            finally:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            leaked = [
+                warning for warning in caught if "never retrieved" in str(warning.message).lower()
+            ]
+            assert leaked == []
+
+    asyncio.run(_run())
+    assert "confirm" in caps.eligible_types(registered)
+    assert idle_claims["n"] > 1
+
+    later = now + timedelta(seconds=20)
+    with session_factory.begin() as session:
+        item = session.get(WorkItem, item_id)
+        assert item is not None
+        assert item.status == "leased"
+        item.lease_until = now - timedelta(seconds=1)
+        session.flush()
+        reclaimed = _claim(session, item_id, now=later, worker_id="finalize-survivor")
+        assert reclaimed is not None
+        assert reclaimed.idempotency_key == stored_key
+        assert reclaimed.attempt_id != first_attempt_id
+        hold_unclaimable(session, order_id)
+
+    with session_factory() as session:
+        first = session.get(Attempt, first_attempt_id)
+        assert first is not None
+        assert first.outcome is None
+
+
+def test_finalize_db_io_does_not_stall_event_loop(
+    db_engine: Engine,
+    session_factory: sessionmaker[Session],
+) -> None:
+    order_id, item_id, _ = _seed_confirm(session_factory)
+    now = datetime.now(UTC)
+    worker_id = "finalize-off-loop"
+    with session_factory.begin() as session:
+        claimed = _claim(session, item_id, now=now, worker_id=worker_id)
+        assert claimed is not None
+
+    started = threading.Event()
+    release = threading.Event()
+    progressed = threading.Event()
+
+    async def handler(_item: ClaimedWork) -> HandlerResult:
+        return HandlerResult(outcome="ok")
+
+    worker = Worker(
+        _settings(),
+        db_engine,
+        handlers={"confirm": cast(WorkHandler, handler)},
+        worker_id=worker_id,
+        idle_s=0.01,
+    )
+
+    def blocked_finalize(_claimed: ClaimedWork, _result: HandlerResult) -> None:
+        started.set()
+        release.wait(timeout=5.0)
+
+    worker.finalize = blocked_finalize  # type: ignore[assignment]
+    health_app = create_health_app(db_engine)
+
+    def _unstick() -> None:
+        if not progressed.wait(timeout=2.0):
+            release.set()
+
+    watchdog = threading.Thread(target=_unstick, daemon=True)
+    watchdog.start()
+
+    async def _run() -> None:
+        process_task = asyncio.create_task(worker.process(claimed))
+        t0 = time.monotonic()
+        await asyncio.to_thread(started.wait, 3.0)
+        assert started.is_set()
+        assert time.monotonic() - t0 < 0.5
+        await asyncio.sleep(0.05)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.Event().wait(), timeout=0.05)
+        transport = httpx.ASGITransport(app=health_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://worker") as client:
+            response = await asyncio.wait_for(client.get("/health"), timeout=0.5)
+        assert response.status_code == 200
+        progressed.set()
+        release.set()
+        await asyncio.wait_for(process_task, timeout=2.0)
+
+    try:
+        asyncio.run(_run())
+    finally:
+        release.set()
+        with session_factory.begin() as session:
+            hold_unclaimable(session, order_id)
+    assert progressed.is_set()
