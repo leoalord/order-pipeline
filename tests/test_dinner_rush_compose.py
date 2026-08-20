@@ -168,7 +168,7 @@ def test_scenario_0_steady_walk_and_scenario_1_rush() -> None:
         "POST",
         f"{LOADGEN_URL}/calibrate",
         json={"step_s": 8, "start_rps": 0.4, "factor": 1.5, "max_rps": 1.2},
-        timeout=70.0,
+        timeout=240.0,
     )
     assert calibrated.status_code == 200, calibrated.text
     h = calibrated.json()["h"]

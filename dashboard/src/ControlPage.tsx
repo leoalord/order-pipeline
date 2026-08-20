@@ -351,8 +351,8 @@ export function PresenterRail({
           </strong>
           <small>
             {calibrated
-              ? "Recalibrate after changing the worker or dependency topology. Recalibrate stops arrivals, waits for cook/ride to quiesce, then mints a measurement cohort so leftover parked rows cannot pin oldest-age and leftover pans cannot understate H."
-              : "Fresh volume first (`docker compose down -v`). Calibrate stops, quiesces cook/ride, mints a measurement cohort, and finds the fastest rate that keeps up before kitchen, courier, or the door say busy. Normal runs on the fallback. Rush needs a measured H."}
+              ? "Recalibrate after changing the worker or dependency topology. Recalibrate stops arrivals, quiesces the prior cohort, mints a measurement cohort, and publishes H only after that cohort also releases cook/ride capacity."
+              : "Fresh volume first (`docker compose down -v`). Calibrate quiesces before and after measuring; a bounded timeout fails visibly instead of publishing a contaminated H. Normal runs on the fallback. Rush needs a measured H."}
           </small>
           <p className="load-split" aria-label="Load outcome split">
             offered {loadgen?.offered ?? 0}

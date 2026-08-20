@@ -275,6 +275,16 @@ class OpenLoopDriver:
             "oldest_age_s": oldest_age_s(snapshot),
         }
 
+    def _quiesce_summary(self, result: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "quiesced": result.get("quiesced"),
+            "timed_out": result.get("timed_out"),
+            "reason": result.get("reason"),
+            "waiting_backlog": result.get("waiting_backlog"),
+            "in_service": result.get("in_service"),
+            "currently_leased": result.get("currently_leased"),
+        }
+
     async def _quiesce_pipeline(self, *, timeout_s: float) -> dict[str, Any]:
         """Wait for waiting + cook/ride + leased work on the active cohort."""
         deadline = time.monotonic() + timeout_s
@@ -285,7 +295,7 @@ class OpenLoopDriver:
             "parked": 0,
             "oldest_age_s": None,
         }
-        while time.monotonic() < deadline:
+        while True:
             snapshot = await self.client.snapshot(self.cohort_id)
             last = self._activity_from_snapshot(snapshot)
             if not self._pipeline_busy(snapshot):
@@ -451,6 +461,26 @@ class OpenLoopDriver:
         # Quiesce the old cohort (cook/ride still occupy pans/bikes) before
         # minting; a new cohort hides leftover parked age but not rail occupancy.
         prior = await self.stop_and_drain()
+        prior_summary = self._quiesce_summary(prior)
+        if prior.get("timed_out"):
+            self.h = 0.0
+            self.h_source = "calibration_failed"
+            return {
+                "h": 0.0,
+                "cohort_id": str(self.cohort_id),
+                "http_429s": {"door": 0, "kitchen": 0, "courier": 0},
+                "door_first": False,
+                "downstream_429_observed": False,
+                "oldest_age_s": prior.get("oldest_age_s"),
+                "steps": [],
+                "hint": prior.get("reason"),
+                "aborted": "prior_quiesce_timeout",
+                "diagnostic": prior_summary,
+                "prior_quiesce": prior_summary,
+                "final_quiesce": None,
+                "timed_out": True,
+                **self.load_counters(),
+            }
         self.new_cohort()
         steps: list[dict[str, Any]] = []
         h = 0.0
@@ -470,6 +500,11 @@ class OpenLoopDriver:
             await asyncio.sleep(warmup)
             first = await self.client.snapshot(self.cohort_id)
             await asyncio.sleep(max(0.0, step - warmup))
+            # Close the step's arrival window before reading its outcomes.
+            # Otherwise a request dispatched near the boundary can time out
+            # after this step has already been certified transport-clean.
+            self.stop()
+            await self._drain_http()
             last = await self.client.snapshot(self.cohort_id)
             last_snapshot = last
             after = self.load_counters()
@@ -547,10 +582,16 @@ class OpenLoopDriver:
                 diagnostic = self._dirty_diagnostic(last)
                 break
             rps = round(rps * grow, 4)
-        self.stop()
-        await self._drain_http()
+        # Do not publish H while calibration traffic still occupies pans,
+        # bikes, or worker leases. The presenter mints the demo cohort next.
+        final = await self._quiesce_pipeline(timeout_s=self.settings.drain_timeout_s)
+        final_summary = self._quiesce_summary(final)
+        if final.get("timed_out"):
+            h = 0.0
+            aborted = "final_quiesce_timeout"
+            diagnostic = final_summary
         self.h = h
-        self.h_source = "calibrated"
+        self.h_source = "calibration_failed" if final.get("timed_out") else "calibrated"
         # Snapshot counters are cohort-cumulative. Restrict this decision to
         # brake events observed during this calibration so an earlier run
         # cannot poison the result after the operator raises the door cap.
@@ -563,21 +604,22 @@ class OpenLoopDriver:
             "downstream_429_observed": downstream_429_observed,
             "oldest_age_s": last_oldest,
             "steps": steps,
-            "hint": ("raise API_ACCEPT_CONCURRENCY and recalibrate" if door_first else None),
+            "hint": (
+                final.get("reason")
+                if final.get("timed_out")
+                else ("raise API_ACCEPT_CONCURRENCY and recalibrate" if door_first else None)
+            ),
             "aborted": aborted,
             "diagnostic": diagnostic,
-            "prior_quiesce": {
-                "quiesced": prior.get("quiesced"),
-                "timed_out": prior.get("timed_out"),
-                "reason": prior.get("reason"),
-                "waiting_backlog": prior.get("waiting_backlog"),
-                "in_service": prior.get("in_service"),
-                "currently_leased": prior.get("currently_leased"),
-            },
+            "prior_quiesce": prior_summary,
+            "final_quiesce": final_summary,
+            "timed_out": bool(final.get("timed_out")),
             **self.load_counters(),
         }
         if aborted is not None and last_snapshot:
-            result["hint"] = diagnostic["hint"] if diagnostic is not None else result["hint"]
+            result["hint"] = (
+                diagnostic.get("hint", result["hint"]) if diagnostic is not None else result["hint"]
+            )
         return result
 
     async def start_rush(self, *, mult: float = 1.0) -> dict[str, Any]:
@@ -616,8 +658,8 @@ class OpenLoopDriver:
 
         Parking is shedding, not recovery: parked rows are reported and never
         satisfy the predicate. A recorded waiting peak above baseline is
-        required, then both halves recover, or waiting declined from that
-        peak and parked-excluded age recovered.
+        required, then backlog and either total or parked-excluded age must
+        recover. Parking is never a substitute for backlog recovery.
         """
         base_backlog = self._rush_baseline_backlog if baseline_backlog is None else baseline_backlog
         base_age = self._rush_baseline_age_s if baseline_age_s is None else baseline_age_s
@@ -636,8 +678,6 @@ class OpenLoopDriver:
         seen_peak_age = base_age if peak_age_s is None else peak_age_s
         seen_peak_unparked = seen_peak_age
         prev_waiting: int | None = None
-        prev_age: float | None = None
-        prev_unparked: float | None = None
         backlog_streak = 0
         age_streak = 0
         unparked_streak = 0
@@ -671,25 +711,18 @@ class OpenLoopDriver:
                 backlog_streak = 0
             if age is None and parked == 0:
                 age_streak = streak_k
-            elif prev_age is not None and age is not None and age < prev_age:
+            elif age is not None and age < seen_peak_age:
                 age_streak += 1
             else:
                 age_streak = 0
             if unparked_age is None and parked == 0:
                 unparked_streak = streak_k
-            elif (
-                prev_unparked is not None
-                and unparked_age is not None
-                and unparked_age < prev_unparked
-            ):
+            elif unparked_age is not None and unparked_age < seen_peak_unparked:
                 unparked_streak += 1
             else:
                 unparked_streak = 0
             prev_waiting = waiting
-            prev_age = age
-            prev_unparked = unparked_age
             waiting_rose = seen_peak_backlog > base_backlog
-            waiting_declined = waiting < seen_peak_backlog
             backlog_at_baseline = waiting <= base_backlog + backlog_slack
             age_at_baseline = (age is None and parked == 0) or (
                 age is not None and age <= base_age + age_slack
@@ -700,9 +733,8 @@ class OpenLoopDriver:
             backlog_recovered = backlog_at_baseline or backlog_streak >= streak_k
             age_recovered = age_at_baseline or age_streak >= streak_k
             unparked_age_recovered = unparked_at_baseline or unparked_streak >= streak_k
-            recovered = waiting_rose and (
-                (backlog_recovered and age_recovered)
-                or (waiting_declined and unparked_age_recovered)
+            recovered = (
+                waiting_rose and backlog_recovered and (age_recovered or unparked_age_recovered)
             )
             if recovered:
                 return {

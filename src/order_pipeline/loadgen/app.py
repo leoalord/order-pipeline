@@ -117,7 +117,7 @@ def create_app(
     async def calibrate(request: Request) -> dict[str, Any]:
         body = await _read_json_object(request)
         try:
-            return await driver.calibrate(
+            result = await driver.calibrate(
                 step_s=_optional_float(body.get("step_s")),
                 start_rps=_optional_float(body.get("start_rps")),
                 factor=_optional_float(body.get("factor")),
@@ -125,6 +125,9 @@ def create_app(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if result.get("timed_out"):
+            raise HTTPException(status_code=504, detail=result)
+        return result
 
     @app.post("/scenario/steady")
     def steady() -> dict[str, Any]:

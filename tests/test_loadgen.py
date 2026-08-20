@@ -46,6 +46,7 @@ class FakePipeline:
         self.place_keys: list[str] = []
         self.snapshots = 0
         self.backlog_end = 0
+        self.drain_after_snapshots: int | None = None
 
     def _idle_snapshot(self) -> dict[str, Any]:
         # Calibrate now quiesces before the ramp. Idle until the first POST
@@ -71,6 +72,8 @@ class FakePipeline:
         if not self.places:
             return self._idle_snapshot()
         self.snapshots += 1
+        if self.drain_after_snapshots is not None and self.snapshots > self.drain_after_snapshots:
+            return self._idle_snapshot()
         backlog = 0 if self.snapshots == 1 else self.backlog_end
         return {
             "backlog": {
@@ -223,6 +226,7 @@ def test_calibrate_reports_h_and_429_mix() -> None:
 def test_calibrate_h_is_last_flat_step_when_backlog_climbs() -> None:
     fake = FakePipeline()
     fake.backlog_end = 40
+    fake.drain_after_snapshots = 6
     settings = loadgen_settings(calibrate_step_s=0.05)
     driver = OpenLoopDriver(settings, fake)
 
@@ -241,6 +245,7 @@ def test_calibrate_h_is_last_flat_step_when_backlog_climbs() -> None:
 def test_zero_h_refuses_steady_and_rush() -> None:
     fake = FakePipeline()
     fake.backlog_end = 40
+    fake.drain_after_snapshots = 2
     app = create_app(loadgen_settings(calibrate_step_s=0.05), client=fake)
 
     with TestClient(app) as client:
@@ -307,6 +312,8 @@ def test_calibrate_keeps_probing_after_backlog_growth_until_downstream_429() -> 
                 (10, 0),
                 (10, 1),  # 2.0 rps: continue probing until kitchen busy is seen.
             )
+            if self.snapshots > len(samples):
+                return self._idle_snapshot()
             backlog, kitchen_429s = samples[min(self.snapshots - 1, len(samples) - 1)]
             return {
                 "backlog": {
@@ -350,7 +357,7 @@ def test_calibrate_ignores_in_service_cook_and_ride_polls() -> None:
             if not self.places:
                 return self._idle_snapshot()
             self.snapshots += 1
-            cook = 0 if self.snapshots == 1 else 40
+            cook = 0 if self.snapshots == 1 or self.snapshots > 6 else 40
             return {
                 "backlog": {
                     "confirm": 0,
@@ -678,6 +685,42 @@ def test_unresolved_transport_invalidates_a_calibration_step() -> None:
     assert body["accepted"] == 0
 
 
+class DelayedTransportDuringCalibrate(FakePipeline):
+    """The request crosses the sampling boundary before its timeout is known."""
+
+    async def place(self, *, items: list[str], cohort_id: UUID, place_key: str) -> int:
+        self.places.append((list(items), cohort_id))
+        self.place_keys.append(place_key)
+        await asyncio.sleep(0.08)
+        raise httpx.ReadTimeout("lost after the calibration window")
+
+
+def test_calibrate_drains_step_requests_before_certifying_transport_clean() -> None:
+    fake = DelayedTransportDuringCalibrate()
+    driver = OpenLoopDriver(
+        loadgen_settings(place_timeout_retries=0),
+        fake,
+    )
+
+    async def run() -> dict[str, Any]:
+        await driver.start()
+        result = await driver.calibrate(
+            step_s=0.05,
+            start_rps=1.0,
+            factor=2.0,
+            max_rps=1.0,
+        )
+        await driver.aclose()
+        return result
+
+    body = asyncio.run(run())
+    assert body["h"] == 0.0
+    assert body["transport_unknown"] == 1
+    assert body["steps"][0]["transport_unknown"] == 1
+    assert body["steps"][0]["transport_clean"] is False
+    assert body["steps"][0]["flat"] is False
+
+
 class DirtyOldestPipeline(FakePipeline):
     async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
         del cohort_id
@@ -776,6 +819,21 @@ def test_stop_and_drain_waits_for_cook_and_ride_after_posts() -> None:
     assert body["in_service"] == 0
     assert fake.snapshots >= 4
     assert body["_elapsed"] >= 0.04
+
+
+def test_stop_and_drain_checks_quiescence_at_timeout_boundary() -> None:
+    fake = LingeringCookPipeline()
+    fake.cook_left = 1
+    driver = OpenLoopDriver(
+        loadgen_settings(drain_timeout_s=0.02, drain_poll_s=0.02),
+        fake,
+    )
+
+    body = asyncio.run(driver.stop_and_drain())
+
+    assert fake.snapshots == 2
+    assert body["quiesced"] is True
+    assert body["timed_out"] is False
 
 
 class RecoveringRushPipeline:
@@ -1012,6 +1070,104 @@ def test_observe_drain_504s_when_waiting_never_rose() -> None:
     assert body["waiting_rose"] is False
 
 
+class OneItemBelowPeakPipeline:
+    async def place(self, *, items: list[str], cohort_id: UUID, place_key: str) -> int:
+        del items, cohort_id, place_key
+        return 201
+
+    async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
+        del cohort_id
+        return {
+            "backlog": {
+                "confirm": 99,
+                "poll_cook": 0,
+                "dispatch": 0,
+                "poll_ride": 0,
+            },
+            "oldest_open": {"age_s": 1.0, "stage": "placed"},
+            "oldest_unparked": {"age_s": 1.0, "stage": "placed"},
+            "http_429s": {"door": 0, "kitchen": 0, "courier": 0},
+            "parked_list": [],
+            "currently_leased": 0,
+        }
+
+    async def aclose(self) -> None:
+        return None
+
+
+def test_observe_drain_rejects_first_one_item_decline_from_peak() -> None:
+    app = create_app(
+        loadgen_settings(drain_poll_s=0.01, drain_timeout_s=0.06),
+        client=OneItemBelowPeakPipeline(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/observe-drain",
+            json={
+                "baseline_backlog": 0,
+                "baseline_age_s": 1.0,
+                "peak_backlog": 100,
+                "peak_age_s": 50.0,
+                "timeout_s": 0.06,
+            },
+        )
+    assert response.status_code == 504, response.text
+    body = response.json()["detail"]
+    assert body["recovered"] is False
+    assert body["waiting_rose"] is True
+    assert body["waiting_backlog"] == 99
+    assert body["backlog_recovered"] is False
+
+
+class AgeBelowPeakPipeline:
+    async def place(self, *, items: list[str], cohort_id: UUID, place_key: str) -> int:
+        del items, cohort_id, place_key
+        return 201
+
+    async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
+        del cohort_id
+        return {
+            "backlog": {
+                "confirm": 0,
+                "poll_cook": 0,
+                "dispatch": 0,
+                "poll_ride": 0,
+            },
+            "oldest_open": {"age_s": 20.0, "stage": "placed"},
+            "oldest_unparked": {"age_s": 20.0, "stage": "placed"},
+            "http_429s": {"door": 0, "kitchen": 0, "courier": 0},
+            "parked_list": [],
+            "currently_leased": 0,
+        }
+
+    async def aclose(self) -> None:
+        return None
+
+
+def test_observe_drain_accepts_age_sustained_below_peak() -> None:
+    app = create_app(
+        loadgen_settings(recovery_streak=3, drain_poll_s=0.01, drain_timeout_s=0.1),
+        client=AgeBelowPeakPipeline(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/observe-drain",
+            json={
+                "baseline_backlog": 0,
+                "baseline_age_s": 1.0,
+                "peak_backlog": 8,
+                "peak_age_s": 40.0,
+                "timeout_s": 0.1,
+            },
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["recovered"] is True
+    assert body["samples"] == 3
+    assert body["backlog_recovered"] is True
+    assert body["age_recovered"] is True
+
+
 class TimeoutThenMintCohort(TimeoutAfterCommit):
     """Commit-then-timeout, then mint a new cohort before the replay."""
 
@@ -1090,6 +1246,64 @@ class NeverQuiescePipeline:
 
     async def aclose(self) -> None:
         return None
+
+
+class BusyAfterCalibrationPlace(FakePipeline):
+    async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
+        del cohort_id
+        if not self.places:
+            return self._idle_snapshot()
+        return {
+            "backlog": {
+                "confirm": 0,
+                "poll_cook": 4,
+                "dispatch": 0,
+                "poll_ride": 2,
+            },
+            "oldest_open": {"age_s": 9.0, "stage": "being prepared"},
+            "oldest_unparked": {"age_s": 9.0, "stage": "being prepared"},
+            "http_429s": {"door": 0, "kitchen": 0, "courier": 0},
+            "currently_leased": 1,
+        }
+
+
+def test_calibrate_504s_when_starting_quiesce_times_out() -> None:
+    app = create_app(
+        loadgen_settings(drain_timeout_s=0.06, drain_poll_s=0.01),
+        client=NeverQuiescePipeline(),
+    )
+    original_cohort = str(app.state.driver.cohort_id)
+    with TestClient(app) as client:
+        response = client.post(
+            "/calibrate",
+            json={"step_s": 0.05, "start_rps": 1.0, "factor": 2.0, "max_rps": 1.0},
+        )
+    assert response.status_code == 504, response.text
+    body = response.json()["detail"]
+    assert body["h"] == 0.0
+    assert body["aborted"] == "prior_quiesce_timeout"
+    assert body["prior_quiesce"]["timed_out"] is True
+    assert body["steps"] == []
+    assert body["cohort_id"] == original_cohort
+
+
+def test_calibrate_504s_when_final_quiesce_times_out() -> None:
+    app = create_app(
+        loadgen_settings(drain_timeout_s=0.06, drain_poll_s=0.01),
+        client=BusyAfterCalibrationPlace(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/calibrate",
+            json={"step_s": 0.05, "start_rps": 1.0, "factor": 2.0, "max_rps": 1.0},
+        )
+    assert response.status_code == 504, response.text
+    body = response.json()["detail"]
+    assert body["h"] == 0.0
+    assert body["aborted"] == "final_quiesce_timeout"
+    assert body["prior_quiesce"]["quiesced"] is True
+    assert body["final_quiesce"]["timed_out"] is True
+    assert body["steps"][0]["flat"] is True
 
 
 def test_stop_endpoint_returns_504_when_pipeline_still_busy() -> None:
