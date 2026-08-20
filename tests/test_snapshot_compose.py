@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -15,8 +16,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from order_pipeline.api.snapshot import STAGE_NAMES, duplicate_effects_from_ledgers
 from order_pipeline.intake import DEFAULT_COHORT_ID, confirm_idempotency_key
-from order_pipeline.models import Attempt, OrderEvent, WorkItem
+from order_pipeline.models import Attempt, Order, OrderEvent, WorkItem
 from order_pipeline.worker.dispatch import dispatch_idempotency_key
+from tests.conftest import hold_unclaimable
 from tests.sim_admin import mix_off, mix_on
 
 API_URL = "http://localhost:8000"
@@ -310,3 +312,66 @@ def test_compose_snapshot_wiring() -> None:
     assert compose.count("${ORDER_PIPELINE_DEP_CAP_CSIM:-8}") == 2
     assert compose.count("${ORDER_PIPELINE_TASK_CAPACITY:-24}") == 2
     assert compose.count("${ORDER_PIPELINE_CONFIRM_DEADLINE_S:-120}") == 2
+
+
+def test_snapshot_isolation_zero_false_mismatches_under_load(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """After REPEATABLE READ, event mismatches stay 0 across >=500 loaded polls.
+
+    Pre-fix baseline: ~1% false state_vs_last_order_events_mismatches (7/673)
+    at ~3 orders/s and 50ms poll. Conservation residual is a partition of one
+    orders SELECT (in_flight = not terminal) and is not lost-order evidence.
+    """
+    mix_on()
+    cohort_id = uuid.uuid4()
+    stop = threading.Event()
+    errors: list[str] = []
+
+    def produce() -> None:
+        while not stop.is_set():
+            try:
+                _place_chips(cohort_id=cohort_id, prefix="iso-load")
+            except Exception as exc:
+                errors.append(str(exc))
+            time.sleep(1.0 / 3.0)
+
+    worker = threading.Thread(target=produce, daemon=True)
+    worker.start()
+    samples: list[int] = []
+    stage_vectors: list[tuple[tuple[str, int], ...]] = []
+    try:
+        deadline = time.monotonic() + 95.0
+        while len(samples) < 500 and time.monotonic() < deadline:
+            started = time.monotonic()
+            body = _snapshot(cohort_id=cohort_id)
+            samples.append(int(body["state_vs_last_order_events_mismatches"]))
+            stage_vectors.append(tuple(sorted(body["stages"].items())))
+            pause = 0.05 - (time.monotonic() - started)
+            if pause > 0:
+                time.sleep(pause)
+    finally:
+        stop.set()
+        worker.join(timeout=5.0)
+
+    assert not errors, errors[:3]
+    assert len(samples) >= 500, len(samples)
+    # A quiet cohort cannot flash a false mismatch, so zero mismatches across a
+    # static pipeline proves nothing. Require the sampled window to actually
+    # contain committed transitions, or this guard silently disarms itself.
+    churn = sum(1 for a, b in zip(stage_vectors, stage_vectors[1:]) if a != b)
+    assert churn >= 50, (
+        f"pipeline too quiet to prove anything: {churn} stage changes across {len(samples)} polls"
+    )
+    mismatched = sum(1 for value in samples if value)
+    assert mismatched == 0, (
+        f"{mismatched}/{len(samples)} polls flashed state_vs_last_order_events_mismatches "
+        f"(max={max(samples)})"
+    )
+    last = _snapshot(cohort_id=cohort_id)
+    assert last["startup_scan"] == 0
+    # Ledger unavailable must stay unknown; compose ledgers are reachable here.
+    assert last["duplicate_effects"] == 0
+    with session_factory.begin() as session:
+        leftover = list(session.scalars(select(Order.id).where(Order.cohort_id == cohort_id)))
+        hold_unclaimable(session, *leftover)

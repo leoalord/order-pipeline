@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from order_pipeline.api.schemas import SnapshotResponse
 from order_pipeline.api.snapshot import (
     STAGE_NAMES,
     build_snapshot,
@@ -17,6 +20,7 @@ from order_pipeline.api.snapshot import (
     order_id_from_ledger_key,
     percentile,
     retry_attempt_ids,
+    snapshot_read_session,
 )
 from order_pipeline.intake import confirm_idempotency_key, place_order, void_idempotency_key
 from order_pipeline.lifecycle import CAUSE_INVALID, CAUSE_ORPHANED
@@ -611,3 +615,114 @@ def test_snapshot_duplicate_effects_none_when_ledgers_unavailable(
     assert snap.http_429s.door == 3
     assert snap.accept_reject.rejected == 3
     assert snap.accept_reject.accepted == 1
+
+
+def _confirm_like_worker(
+    factory: sessionmaker[Session], order_id: uuid.UUID, now: datetime
+) -> None:
+    with factory.begin() as session:
+        order = session.get(Order, order_id)
+        assert order is not None
+        session.add(
+            OrderEvent(
+                order_id=order_id,
+                from_state=order.state,
+                to_state="confirmed",
+                actor="worker",
+                cause="confirm",
+                timestamp=now,
+                applied=True,
+            )
+        )
+        order.state = "confirmed"
+        order.version += 1
+
+
+def _snapshot_with_interleaved_commit(
+    session: Session,
+    *,
+    cohort_id: uuid.UUID,
+    now: datetime,
+    on_after_orders: Callable[[], None],
+) -> SnapshotResponse:
+    return build_snapshot(
+        session,
+        cohort_id=cohort_id,
+        now=now,
+        ledger_counts=(),
+        after_orders=on_after_orders,
+    )
+
+
+def test_snapshot_read_session_is_repeatable_read_readonly(db_engine: Engine) -> None:
+    with snapshot_read_session(db_engine) as session:
+        isolation = session.execute(text("SHOW transaction_isolation")).scalar_one()
+        readonly = session.execute(text("SHOW transaction_read_only")).scalar_one()
+    assert isolation == "repeatable read"
+    assert readonly == "on"
+
+
+def test_repeatable_read_snapshot_is_self_consistent_across_interleaved_commit(
+    db_engine: Engine,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A worker commit between orders and events must not mix pre/post views."""
+    cohort = uuid.uuid4()
+    now = datetime.now(UTC)
+    with session_factory.begin() as session:
+        order = _place(session, cohort_id=cohort)
+        order_id = order.id
+        hold_unclaimable(session, order_id)
+
+    def interleave() -> None:
+        _confirm_like_worker(session_factory, order_id, now + timedelta(seconds=1))
+
+    with snapshot_read_session(db_engine) as session:
+        snap = _snapshot_with_interleaved_commit(
+            session, cohort_id=cohort, now=now, on_after_orders=interleave
+        )
+
+    assert snap.state_vs_last_order_events_mismatches == 0
+    assert snap.stages["placed"] == 1
+    assert snap.stages.get("confirmed", 0) == 0
+
+    with snapshot_read_session(db_engine) as session:
+        after = build_snapshot(session, cohort_id=cohort, now=now, ledger_counts=())
+    assert after.stages["confirmed"] == 1
+    assert after.state_vs_last_order_events_mismatches == 0
+
+
+def test_read_committed_snapshot_can_mix_pre_and_post_commit_views(
+    db_engine: Engine,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Characterize the false mismatch: READ COMMITTED is what REPEATABLE READ fixes."""
+    cohort = uuid.uuid4()
+    now = datetime.now(UTC)
+    with session_factory.begin() as session:
+        order = _place(session, cohort_id=cohort)
+        order_id = order.id
+        hold_unclaimable(session, order_id)
+
+    def interleave() -> None:
+        _confirm_like_worker(session_factory, order_id, now + timedelta(seconds=1))
+
+    with Session(db_engine, expire_on_commit=False) as session:
+        snap = _snapshot_with_interleaved_commit(
+            session, cohort_id=cohort, now=now, on_after_orders=interleave
+        )
+
+    assert snap.state_vs_last_order_events_mismatches >= 1
+    assert snap.stages["placed"] == 1
+
+
+def test_get_snapshot_opens_repeatable_read_before_postgres_queries() -> None:
+    from pathlib import Path
+
+    app = (Path(__file__).resolve().parents[1] / "src/order_pipeline/api/app.py").read_text()
+    snap = (Path(__file__).resolve().parents[1] / "src/order_pipeline/api/snapshot.py").read_text()
+    endpoint = app.split("def get_snapshot", 1)[1].split("def get_order", 1)[0]
+    assert "snapshot_read_session(engine)" in endpoint
+    assert "SessionLocal()" not in endpoint
+    assert 'isolation_level="REPEATABLE READ"' in snap
+    assert "SET TRANSACTION READ ONLY" in snap

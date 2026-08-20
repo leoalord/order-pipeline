@@ -41,6 +41,7 @@ IDLE_SIM_COMPOSE_TESTS = frozenset(IDLE_SIM_COMPOSE_TEST_ORDER)
 STATEFUL_COMPOSE_TEST_ORDER = (
     "tests/test_loadgen_compose.py::test_calibrate_reports_h_and_429_mix",
     "tests/test_dinner_rush_compose.py::test_scenario_0_steady_walk_and_scenario_1_rush",
+    "tests/test_snapshot_compose.py::test_snapshot_isolation_zero_false_mismatches_under_load",
 )
 STATEFUL_COMPOSE_TESTS = frozenset(STATEFUL_COMPOSE_TEST_ORDER)
 

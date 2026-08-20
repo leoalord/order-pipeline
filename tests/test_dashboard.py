@@ -308,6 +308,56 @@ def test_vite_proxy_reserves_loadgen_rsim_csim() -> None:
     assert "VITE_LOADGEN" not in config
 
 
+def test_correctness_drawer_uses_three_state_tones_and_honest_labels() -> None:
+    """Null duplicate_effects is unknown; residual is a partition, not lost-order proof."""
+    home = (DASHBOARD / "src" / "HomePage.tsx").read_text()
+    css = (DASHBOARD / "src" / "styles.css").read_text()
+    assert "function metricTone" in home
+    assert 'if (value === null || value === undefined) return "unknown"' in home
+    assert 'tone={snapshot?.duplicate_effects === 0 ? "healthy" : "fault"}' not in home
+    assert "State vs last applied event" in home
+    assert "Accepted orders with no work item" in home
+    assert "Simulator-ledger duplicate effects" in home
+    assert "Parked work" in home
+    assert "No progress beyond threshold" in home
+    assert "Cannot detect a lost insert" in home
+    assert "ledgers unavailable — unknown, not a pass" in home
+    assert "tone={metricTone(snapshot?.duplicate_effects)}" in home
+    assert "tone={metricTone(snapshot?.invalid_transitions)}" in home
+    assert "tone={metricTone(snapshot?.orphaned_tickets)}" in home
+    assert "tone={metricTone(proof?.residual)}" in home
+    assert ".evidence-metric.unknown" in css
+    assert "startup_scan — crash timeline B" in home
+    assert "the lost-insert detector" not in home
+
+
+def test_correctness_card_tone_reads_independent_evidence_not_residual() -> None:
+    """The always-visible card must redden on the metrics the drawer leads with."""
+    home = (DASHBOARD / "src" / "HomePage.tsx").read_text()
+    tone = home.split("const independentFaults", 1)[1].split("const scenario", 1)[0]
+    for field in (
+        "state_vs_last_order_events_mismatches",
+        "startup_scan",
+        "invalid_transitions",
+        "orphaned_tickets",
+        "duplicate_effects",
+    ):
+        assert f"snapshot.{field}," in tone or f"snapshot.{field}" in tone, field
+    # Residual is a partition of one orders SELECT — it must not gate the card.
+    assert "residual" not in tone
+    assert "Funnel partition" not in home
+
+
+def test_parked_work_is_visibility_not_a_correctness_fault() -> None:
+    """The runbook calls a non-empty parked list expected shedding, not a fail."""
+    home = (DASHBOARD / "src" / "HomePage.tsx").read_text()
+    assert 'parked.length === 0 ? "healthy" : "neutral"' in home
+    assert '(stalled ?? 0) === 0 ? "healthy" : "pressure"' in home
+    assert "tone={parkedTone}" in home
+    assert "tone={stalledTone}" in home
+    assert "metricTone(parkedOrStalled)" not in home
+
+
 def test_makefile_wires_tsc_into_check() -> None:
     makefile = (REPO_ROOT / "Makefile").read_text()
     assert "tsc" in makefile

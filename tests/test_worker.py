@@ -20,6 +20,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import QueuePool
 
 from order_pipeline.cancel import CancelOutcome, cancel_order
 from order_pipeline.intake import place_order, void_idempotency_key
@@ -881,6 +882,9 @@ def test_worker_engine_validates_stale_pooled_connections() -> None:
     engine = create_worker_engine(settings)
     try:
         assert getattr(engine.pool, "_pre_ping", False) is True
+        # pool_size/max_overflow only mean anything on a QueuePool, and the
+        # narrowing is what gives mypy `size()` on the abstract Pool type.
+        assert isinstance(engine.pool, QueuePool)
         # Off-loop finalize made concurrent checkouts possible; the default
         # 5 + 10 pool is smaller than the threads that can demand one.
         assert engine.pool.size() == settings.finalize_workers + WORKER_DB_POOL_HEADROOM
