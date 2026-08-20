@@ -149,6 +149,8 @@ def test_snapshot_fields_cohort_filter_and_trace_null_attempts(
     assert snap.backlog["confirm"] == 1
     assert snap.oldest_open.stage == "confirmed"
     assert snap.oldest_open.age_s is not None
+    assert snap.oldest_unparked.stage == "confirmed"
+    assert snap.oldest_unparked.age_s is not None
     assert snap.http_429s.door == 0
     assert snap.http_429s.kitchen == 0
     assert snap.http_429s.courier == 0
@@ -449,6 +451,38 @@ def test_stretching_etas_include_assigned_courier_while_order_stays_ready(
     assert snap.stages["ready"] == 1
     assert snap.stretching_etas.count == 1
     assert snap.stretching_etas.max_stretch_s == 15.0
+
+
+def test_oldest_unparked_excludes_parked_open_orders(
+    session_factory: sessionmaker[Session],
+) -> None:
+    cohort = uuid.uuid4()
+    now = datetime.now(UTC)
+    with session_factory() as session:
+        session.begin()
+        try:
+            parked_order = _place(session, cohort_id=cohort)
+            live = _place(session, cohort_id=cohort)
+            session.flush()
+            parked_order.accepted_at = now - timedelta(seconds=40)
+            live.accepted_at = now - timedelta(seconds=5)
+            parked_item = session.scalars(
+                select(WorkItem).where(WorkItem.order_id == parked_order.id)
+            ).one()
+            parked_item.status = "parked"
+            parked_item.park_owner = "worker-1"
+            parked_item.park_reason = "retry_budget_exhausted"
+            parked_item.park_next_action = "redrive"
+            session.flush()
+            hold_unclaimable(session, parked_order.id, live.id)
+            snap = build_snapshot(session, cohort_id=cohort, now=now, ledger_counts=())
+            assert snap.oldest_open.age_s is not None
+            assert snap.oldest_open.age_s >= 39
+            assert snap.oldest_unparked.age_s is not None
+            assert snap.oldest_unparked.age_s < snap.oldest_open.age_s
+            assert abs(snap.oldest_unparked.age_s - 5.0) < 1.0
+        finally:
+            session.rollback()
 
 
 def test_startup_scan_and_mismatch_and_leased_and_parked_outside(

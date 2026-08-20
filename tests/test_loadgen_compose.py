@@ -24,6 +24,7 @@ DINNER_RUSH_KEYS = (
     "backlog",
     "retry_rate",
     "oldest_open",
+    "oldest_unparked",
     "http_429s",
     "stretching_etas",
     "parked_list",
@@ -93,6 +94,8 @@ def test_snapshot_json_has_dinner_rush_keys() -> None:
     assert set(body["http_429s"]) == {"door", "kitchen", "courier"}
     oldest = body["oldest_open"]
     assert "age_s" in oldest and "stage" in oldest
+    unparked = body["oldest_unparked"]
+    assert "age_s" in unparked and "stage" in unparked
     assert set(body["accept_reject"]) == {"accepted", "rejected"}
     assert isinstance(body["parked_list"], list)
     assert set(body["sim_http"]) == {"restaurant", "courier"}

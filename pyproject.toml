@@ -55,7 +55,7 @@ plugins = ["pydantic.mypy"]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
 addopts = "-q"
-markers = ["slow: compose calibrate / long integration"]
+markers = ["slow: compose calibrate / rush / crash / long integration"]
 
 [tool.pydantic-mypy]
 init_forbid_extra = true

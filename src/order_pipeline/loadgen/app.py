@@ -165,7 +165,10 @@ def create_app(
 
     @app.post("/stop")
     async def stop() -> dict[str, Any]:
-        return await driver.stop_and_drain()
+        result = await driver.stop_and_drain()
+        if result.get("timed_out"):
+            raise HTTPException(status_code=504, detail=result)
+        return result
 
     @app.post("/observe-drain")
     async def observe_drain(request: Request) -> dict[str, Any]:

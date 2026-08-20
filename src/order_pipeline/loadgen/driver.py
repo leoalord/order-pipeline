@@ -79,12 +79,36 @@ def http_429s_from_snapshot(snapshot: dict[str, Any]) -> dict[str, int]:
     return mix
 
 
-def oldest_age_s(snapshot: dict[str, Any]) -> float | None:
-    raw = snapshot.get("oldest_open")
+def _age_from_open(raw: object) -> float | None:
     if not isinstance(raw, dict):
         return None
     age = raw.get("age_s")
     return float(age) if isinstance(age, (int, float)) and not isinstance(age, bool) else None
+
+
+def oldest_age_s(snapshot: dict[str, Any]) -> float | None:
+    return _age_from_open(snapshot.get("oldest_open"))
+
+
+def oldest_unparked_age_s(snapshot: dict[str, Any]) -> float | None:
+    """Oldest open age excluding parked orders.
+
+    Live snapshots send `oldest_unparked`. Fakes that omit it: no parks →
+    `oldest_open`; only parked work remains → None (shedding, not recovery);
+    mixed leftover → `oldest_open` (parks still pin).
+    """
+    explicit = snapshot.get("oldest_unparked")
+    if isinstance(explicit, dict):
+        return _age_from_open(explicit)
+    if parked_count(snapshot) == 0:
+        return oldest_age_s(snapshot)
+    if (
+        waiting_backlog(snapshot) == 0
+        and in_service_backlog(snapshot) == 0
+        and currently_leased(snapshot) == 0
+    ):
+        return None
+    return oldest_age_s(snapshot)
 
 
 def parked_count(snapshot: dict[str, Any]) -> int:
@@ -348,10 +372,10 @@ class OpenLoopDriver:
             task.add_done_callback(self._in_flight.discard)
             next_due += 1.0 / rate
 
-    async def _place_once(self, *, items: list[str], place_key: str) -> int:
+    async def _place_once(self, *, items: list[str], place_key: str, cohort_id: UUID) -> int:
         return await self.client.place(
             items=items,
-            cohort_id=self.cohort_id,
+            cohort_id=cohort_id,
             place_key=place_key,
         )
 
@@ -362,19 +386,25 @@ class OpenLoopDriver:
             two_item_pct=self.settings.two_item_pct,
         )
         place_key = str(uuid.uuid4())
+        # Freeze the body: cohort_id is in the intake fingerprint. A live
+        # Recalibrate / New cohort must not change the replay payload.
+        cohort_id = self.cohort_id
         self.offered += 1
         attempts = 1 + self.settings.place_timeout_retries
         status: int | None = None
         for attempt in range(attempts):
             try:
-                status = await self._place_once(items=items, place_key=place_key)
+                status = await self._place_once(
+                    items=items,
+                    place_key=place_key,
+                    cohort_id=cohort_id,
+                )
                 break
             except Exception as exc:
-                if is_transport_unknown(exc) and attempt + 1 < attempts:
+                if not is_transport_unknown(exc):
+                    raise
+                if attempt + 1 < attempts:
                     continue
-                if is_transport_unknown(exc):
-                    self.transport_unknown += 1
-                    return
                 self.transport_unknown += 1
                 return
         if status == 201:
@@ -417,9 +447,10 @@ class OpenLoopDriver:
         cap = self.settings.calibrate_max_rps if max_rps is None else max_rps
         if step <= 0 or rps <= 0 or grow <= 1.0 or cap < rps:
             raise ValueError("invalid calibrate knobs")
-        await self._drain_http()
-        self.stop()
-        # Fresh cohort so a prior run's parked/stalled rows cannot pin oldest-age.
+        # Stop first so the open-loop clock cannot fire while HTTP drains.
+        # Quiesce the old cohort (cook/ride still occupy pans/bikes) before
+        # minting; a new cohort hides leftover parked age but not rail occupancy.
+        prior = await self.stop_and_drain()
         self.new_cohort()
         steps: list[dict[str, Any]] = []
         h = 0.0
@@ -535,6 +566,14 @@ class OpenLoopDriver:
             "hint": ("raise API_ACCEPT_CONCURRENCY and recalibrate" if door_first else None),
             "aborted": aborted,
             "diagnostic": diagnostic,
+            "prior_quiesce": {
+                "quiesced": prior.get("quiesced"),
+                "timed_out": prior.get("timed_out"),
+                "reason": prior.get("reason"),
+                "waiting_backlog": prior.get("waiting_backlog"),
+                "in_service": prior.get("in_service"),
+                "currently_leased": prior.get("currently_leased"),
+            },
             **self.load_counters(),
         }
         if aborted is not None and last_snapshot:
@@ -576,8 +615,9 @@ class OpenLoopDriver:
         """Wait for a sustained waiting-backlog / oldest-age drain.
 
         Parking is shedding, not recovery: parked rows are reported and never
-        satisfy the predicate. Recovery is a return to within slack of the
-        pre-rush baseline, or K consecutive declining samples.
+        satisfy the predicate. A recorded waiting peak above baseline is
+        required, then both halves recover, or waiting declined from that
+        peak and parked-excluded age recovered.
         """
         base_backlog = self._rush_baseline_backlog if baseline_backlog is None else baseline_backlog
         base_age = self._rush_baseline_age_s if baseline_age_s is None else baseline_age_s
@@ -594,13 +634,17 @@ class OpenLoopDriver:
         deadline = time.monotonic() + limit
         seen_peak_backlog = base_backlog if peak_backlog is None else peak_backlog
         seen_peak_age = base_age if peak_age_s is None else peak_age_s
+        seen_peak_unparked = seen_peak_age
         prev_waiting: int | None = None
         prev_age: float | None = None
+        prev_unparked: float | None = None
         backlog_streak = 0
         age_streak = 0
+        unparked_streak = 0
         parked_seen = False
         last_waiting = base_backlog
         last_age = base_age
+        last_unparked: float | None = base_age
         last_parked = 0
         samples = 0
         while time.monotonic() < deadline:
@@ -608,39 +652,66 @@ class OpenLoopDriver:
             samples += 1
             waiting = waiting_backlog(snapshot)
             age = oldest_age_s(snapshot)
+            unparked_age = oldest_unparked_age_s(snapshot)
             parked = parked_count(snapshot)
             last_waiting = waiting
             last_age = age if age is not None else 0.0
+            last_unparked = unparked_age
             last_parked = parked
             if parked > 0:
                 parked_seen = True
             seen_peak_backlog = max(seen_peak_backlog, waiting)
             if age is not None:
                 seen_peak_age = max(seen_peak_age, age)
+            if unparked_age is not None:
+                seen_peak_unparked = max(seen_peak_unparked, unparked_age)
             if prev_waiting is not None and waiting < prev_waiting:
                 backlog_streak += 1
             else:
                 backlog_streak = 0
-            if age is None:
+            if age is None and parked == 0:
                 age_streak = streak_k
-            elif prev_age is not None and age < prev_age:
+            elif prev_age is not None and age is not None and age < prev_age:
                 age_streak += 1
             else:
                 age_streak = 0
+            if unparked_age is None and parked == 0:
+                unparked_streak = streak_k
+            elif (
+                prev_unparked is not None
+                and unparked_age is not None
+                and unparked_age < prev_unparked
+            ):
+                unparked_streak += 1
+            else:
+                unparked_streak = 0
             prev_waiting = waiting
             prev_age = age
+            prev_unparked = unparked_age
+            waiting_rose = seen_peak_backlog > base_backlog
+            waiting_declined = waiting < seen_peak_backlog
             backlog_at_baseline = waiting <= base_backlog + backlog_slack
-            age_at_baseline = age is None or age <= base_age + age_slack
+            age_at_baseline = (age is None and parked == 0) or (
+                age is not None and age <= base_age + age_slack
+            )
+            unparked_at_baseline = (unparked_age is None and parked == 0) or (
+                unparked_age is not None and unparked_age <= base_age + age_slack
+            )
             backlog_recovered = backlog_at_baseline or backlog_streak >= streak_k
             age_recovered = age_at_baseline or age_streak >= streak_k
-            # Waiting-backlog recovery is the allowed substitute when parks pin age.
-            recovered = backlog_recovered and (age_recovered or backlog_recovered)
+            unparked_age_recovered = unparked_at_baseline or unparked_streak >= streak_k
+            recovered = waiting_rose and (
+                (backlog_recovered and age_recovered)
+                or (waiting_declined and unparked_age_recovered)
+            )
             if recovered:
                 return {
                     "recovered": True,
                     "timed_out": False,
+                    "waiting_rose": waiting_rose,
                     "backlog_recovered": backlog_recovered,
                     "age_recovered": age_recovered,
+                    "unparked_age_recovered": unparked_age_recovered,
                     "waiting_recovered": backlog_recovered,
                     "parked_seen": parked_seen,
                     "parked_count": parked,
@@ -648,8 +719,10 @@ class OpenLoopDriver:
                     "baseline_age_s": base_age,
                     "peak_backlog": seen_peak_backlog,
                     "peak_age_s": seen_peak_age,
+                    "peak_unparked_age_s": seen_peak_unparked,
                     "waiting_backlog": waiting,
                     "oldest_age_s": age,
+                    "oldest_unparked_age_s": unparked_age,
                     "samples": samples,
                     "reason": None,
                 }
@@ -657,11 +730,15 @@ class OpenLoopDriver:
             if remaining <= 0:
                 break
             await asyncio.sleep(min(self.settings.drain_poll_s, remaining))
+        last_unparked_value = last_unparked if last_unparked is not None else 0.0
         return {
             "recovered": False,
             "timed_out": True,
+            "waiting_rose": seen_peak_backlog > base_backlog,
             "backlog_recovered": last_waiting <= base_backlog + backlog_slack,
             "age_recovered": last_age <= base_age + age_slack,
+            "unparked_age_recovered": last_unparked is not None
+            and last_unparked <= base_age + age_slack,
             "waiting_recovered": last_waiting <= base_backlog + backlog_slack,
             "parked_seen": parked_seen,
             "parked_count": last_parked,
@@ -669,13 +746,16 @@ class OpenLoopDriver:
             "baseline_age_s": base_age,
             "peak_backlog": seen_peak_backlog,
             "peak_age_s": seen_peak_age,
+            "peak_unparked_age_s": seen_peak_unparked,
             "waiting_backlog": last_waiting,
             "oldest_age_s": last_age,
+            "oldest_unparked_age_s": last_unparked,
             "samples": samples,
             "reason": (
-                "drain did not sustain a waiting-backlog or oldest-age improvement; "
+                "drain did not sustain waiting-backlog and oldest-age improvement; "
                 f"waiting={last_waiting} peak_waiting={seen_peak_backlog} "
-                f"age={last_age} peak_age={seen_peak_age} parked={last_parked}"
+                f"age={last_age} peak_age={seen_peak_age} "
+                f"unparked_age={last_unparked_value} parked={last_parked}"
             ),
         }
 

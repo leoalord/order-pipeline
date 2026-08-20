@@ -40,12 +40,12 @@ Two worker replicas. Health stays inside the container (8083 is not published). 
 
 The rail is the intended path. **`docker compose down -v && docker compose up --wait` is required before calibration** while simulator ledger pagination stays deferred: a fat restaurant ledger serializes accepts at tens of milliseconds and an H measured on that volume is not comparable to a fresh one.
 
-Calibrate first so rush is sized to this machine; Normal can run on the fallback H, Rush cannot. Calibrate mints its own measurement cohort so leftover parked or stalled rows cannot pin `oldest_age_s` and walk the ramp to `h = 0`.
+Calibrate first so rush is sized to this machine; Normal can run on the fallback H, Rush cannot. Calibrate stops arrivals, waits for the current cohort to quiesce (cook/ride still occupy pans and bikes), then mints its own measurement cohort so leftover parked or stalled rows cannot pin `oldest_age_s` and walk the ramp to `h = 0`. Recalibrate from the rail takes the same path.
 
-1. **Calibrate** — measures H, the highest rate whose waiting backlog stays flat. Status and the calibrate payload separately report offered requests, 201 accepted, door 429, other HTTP, and transport/timeout unknowns. A step with unresolved transport errors is not sustainable. If H is still 0 after a few steps the ramp aborts with a diagnostic instead of walking to `calibrate_max_rps`.
+1. **Calibrate** — measures H, the highest rate whose waiting backlog stays flat. Status, the rail, and the calibrate payload separately report offered requests, 201 accepted, door 429, other HTTP, and transport/timeout unknowns. A step with unresolved transport errors is not sustainable. If H is still 0 after a few steps the ramp aborts with a diagnostic instead of walking to `calibrate_max_rps`.
 2. **New cohort** — isolates the demo walk from calibration traffic.
 3. **01 Normal** — steady `0.4×H`. Follow one ticket through every stage.
-4. **02 Rush** — 60s at `1.5×H`, then drain back to `0.4×H`. Drain means waiting backlog and oldest-age improve (sustained decline or back to the pre-rush baseline). Parking is shedding and is reported separately; it is not recovery. `POST /stop` waits for in-flight POSTs **and** cook/ride work to quiesce.
+4. **02 Rush** — 60s at `1.5×H`, then drain back to `0.4×H`. Drain requires a recorded waiting peak above the pre-rush baseline, then waiting **and** oldest-age improve (or waiting declines from that peak and parked-excluded age improves). Parking is shedding and is reported separately; it is not recovery. `POST /stop` waits for in-flight POSTs **and** cook/ride work to quiesce, and returns 504 if that wait times out.
 
 Same endpoints from the host:
 
@@ -120,8 +120,9 @@ make check   # ruff + mypy + dashboard tsc + pytest
 
 `make check` expects the live Compose stack: pytest talks to the published ports (API 8000, sims 8081/8082, loadgen 8090, dashboard 5173). Happy-path tests turn the mix off, then restore it.
 
-Slow coverage (`@pytest.mark.slow`) is the long calibrate / rush / outage path on that stack:
+Slow coverage (`@pytest.mark.slow`) is the long calibrate / rush / crash / outage path on that stack:
 
 - `tests/test_loadgen_compose.py::test_calibrate_reports_h_and_429_mix`
 - `tests/test_dinner_rush_compose.py::test_scenario_0_steady_walk_and_scenario_1_rush`
+- `tests/test_worker_crash_compose.py::test_scenario_3_kill_resume_then_park_clear_redrive`
 - `tests/test_doom_confirm_compose.py` (outage fixture)

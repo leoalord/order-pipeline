@@ -351,9 +351,16 @@ export function PresenterRail({
           </strong>
           <small>
             {calibrated
-              ? "Recalibrate after changing the worker or dependency topology. Calibrate mints its own cohort so leftover parked or stalled rows cannot pin oldest-age."
-              : "Fresh volume first (`docker compose down -v`). Calibrate mints a measurement cohort and finds the fastest rate that keeps up before kitchen, courier, or the door say busy. Normal runs on the fallback. Rush needs a measured H."}
+              ? "Recalibrate after changing the worker or dependency topology. Recalibrate stops arrivals, waits for cook/ride to quiesce, then mints a measurement cohort so leftover parked rows cannot pin oldest-age and leftover pans cannot understate H."
+              : "Fresh volume first (`docker compose down -v`). Calibrate stops, quiesces cook/ride, mints a measurement cohort, and finds the fastest rate that keeps up before kitchen, courier, or the door say busy. Normal runs on the fallback. Rush needs a measured H."}
           </small>
+          <p className="load-split" aria-label="Load outcome split">
+            offered {loadgen?.offered ?? 0}
+            {" · "}201 {loadgen?.placed ?? 0}
+            {" · "}door 429 {loadgen?.rejected_429 ?? 0}
+            {" · "}other HTTP {loadgen?.other_http ?? 0}
+            {" · "}transport-unknown {loadgen?.transport_unknown ?? 0}
+          </p>
         </div>
         <button
           type="button"

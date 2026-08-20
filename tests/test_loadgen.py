@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
+import uuid
 from typing import Any
 from uuid import UUID
 
@@ -18,6 +19,7 @@ from order_pipeline.loadgen.driver import (
     backlog_total,
     http_429s_from_snapshot,
     in_service_backlog,
+    oldest_unparked_age_s,
     step_is_flat,
     waiting_backlog,
 )
@@ -45,6 +47,18 @@ class FakePipeline:
         self.snapshots = 0
         self.backlog_end = 0
 
+    def _idle_snapshot(self) -> dict[str, Any]:
+        # Calibrate now quiesces before the ramp. Idle until the first POST
+        # so those polls do not consume the scripted step sequence.
+        return {
+            "backlog": _empty_backlog(),
+            "oldest_open": {"age_s": None, "stage": None},
+            "oldest_unparked": {"age_s": None, "stage": None},
+            "http_429s": {"door": 0, "kitchen": 0, "courier": 0},
+            "currently_leased": 0,
+            "parked_list": [],
+        }
+
     async def place(self, *, items: list[str], cohort_id: UUID, place_key: str) -> int:
         self.places.append((list(items), cohort_id))
         self.place_keys.append(place_key)
@@ -54,6 +68,8 @@ class FakePipeline:
 
     async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
         del cohort_id
+        if not self.places:
+            return self._idle_snapshot()
         self.snapshots += 1
         backlog = 0 if self.snapshots == 1 else self.backlog_end
         return {
@@ -64,6 +80,7 @@ class FakePipeline:
                 "poll_ride": 0,
             },
             "oldest_open": {"age_s": 1.0, "stage": "placed"},
+            "oldest_unparked": {"age_s": 1.0, "stage": "placed"},
             "http_429s": {"door": 0, "kitchen": 2, "courier": 1},
             "currently_leased": 0,
         }
@@ -246,7 +263,10 @@ def test_calibrate_rejects_flat_backlog_with_over_age_or_new_park() -> None:
     class UnsafePipeline(FakePipeline):
         async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
             body = await super().snapshot(cohort_id)
+            if not self.places:
+                return body
             body["oldest_open"] = {"age_s": 130.0, "stage": "confirmed"}
+            body["oldest_unparked"] = {"age_s": 130.0, "stage": "confirmed"}
             body["parked_list"] = [] if self.snapshots == 1 else [{"order_id": "parked"}]
             return body
 
@@ -276,6 +296,8 @@ def test_calibrate_keeps_probing_after_backlog_growth_until_downstream_429() -> 
     class OverloadProbePipeline(FakePipeline):
         async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
             del cohort_id
+            if not self.places:
+                return self._idle_snapshot()
             self.snapshots += 1
             samples = (
                 (0, 0),
@@ -325,6 +347,8 @@ def test_calibrate_ignores_in_service_cook_and_ride_polls() -> None:
     class CookingPipeline(FakePipeline):
         async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
             del cohort_id
+            if not self.places:
+                return self._idle_snapshot()
             self.snapshots += 1
             cook = 0 if self.snapshots == 1 else 40
             return {
@@ -335,6 +359,7 @@ def test_calibrate_ignores_in_service_cook_and_ride_polls() -> None:
                     "poll_ride": cook,
                 },
                 "oldest_open": {"age_s": 20.0, "stage": "being prepared"},
+                "oldest_unparked": {"age_s": 20.0, "stage": "being prepared"},
                 "http_429s": {"door": 0, "kitchen": 0, "courier": 0},
             }
 
@@ -362,10 +387,13 @@ def test_calibrate_door_first_ignores_earlier_cumulative_429s() -> None:
     class PriorDoorPipeline(FakePipeline):
         async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
             del cohort_id
+            if not self.places:
+                return self._idle_snapshot()
             self.snapshots += 1
             return {
                 "backlog": {"confirm": 0, "poll_cook": 0, "dispatch": 0, "poll_ride": 0},
                 "oldest_open": {"age_s": 1.0, "stage": "placed"},
+                "oldest_unparked": {"age_s": 1.0, "stage": "placed"},
                 # Ten door rejections predate this calibration; the kitchen
                 # rejection is the only brake that appears during this run.
                 "http_429s": {
@@ -506,12 +534,13 @@ class TimeoutAfterCommit:
         self.committed = 0
         self.place_keys: list[str] = []
         self.bodies: list[list[str]] = []
+        self.cohorts: list[UUID] = []
 
     async def place(self, *, items: list[str], cohort_id: UUID, place_key: str) -> int:
-        del cohort_id
         self.calls += 1
         self.place_keys.append(place_key)
         self.bodies.append(list(items))
+        self.cohorts.append(cohort_id)
         if self.calls == 1:
             self.committed += 1
             raise httpx.ReadTimeout("lost after commit")
@@ -539,6 +568,7 @@ def test_place_timeout_after_commit_replays_same_key_once() -> None:
     assert fake.calls == 2
     assert fake.place_keys[0] == fake.place_keys[1]
     assert fake.bodies[0] == fake.bodies[1]
+    assert fake.cohorts[0] == fake.cohorts[1]
     assert len(set(fake.place_keys)) == 1
     assert driver.placed == 1
     assert driver.offered == 1
@@ -616,6 +646,8 @@ class TransportDuringCalibrate(FakePipeline):
 
     async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
         del cohort_id
+        if not self.places:
+            return self._idle_snapshot()
         self.snapshots += 1
         return {
             "backlog": _empty_backlog(),
@@ -649,6 +681,8 @@ def test_unresolved_transport_invalidates_a_calibration_step() -> None:
 class DirtyOldestPipeline(FakePipeline):
     async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
         del cohort_id
+        if not self.places:
+            return self._idle_snapshot()
         self.snapshots += 1
         return {
             "backlog": _empty_backlog(),
@@ -793,10 +827,13 @@ def test_observe_recovery_requires_sustained_decline_and_reports_parking() -> No
 
     body = asyncio.run(run())
     assert body["recovered"] is True
+    assert body["waiting_rose"] is True
     assert body["backlog_recovered"] is True
+    assert body["age_recovered"] is True
     assert body["parked_seen"] is True
     assert body["parked_count"] >= 1
     assert body["waiting_backlog"] < body["peak_backlog"]
+    assert body["peak_backlog"] > body["baseline_backlog"]
 
 
 def test_observe_drain_endpoint_returns_production_predicate() -> None:
@@ -869,3 +906,214 @@ def test_observe_drain_does_not_treat_parking_as_recovery() -> None:
     assert body["recovered"] is False
     assert body["parked_seen"] is True
     assert body["parked_count"] == 1
+
+
+class ShedToParkPipeline:
+    """Waiting hits 0 only because rows moved to parked_list; age stays at peak."""
+
+    def __init__(self) -> None:
+        self.snapshots = 0
+
+    async def place(self, *, items: list[str], cohort_id: UUID, place_key: str) -> int:
+        del items, cohort_id, place_key
+        return 201
+
+    async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
+        del cohort_id
+        self.snapshots += 1
+        waiting = 8 if self.snapshots == 1 else 0
+        parked = [] if self.snapshots == 1 else [{"order_id": "shed"}]
+        return {
+            "backlog": {
+                "confirm": waiting,
+                "poll_cook": 0,
+                "dispatch": 0,
+                "poll_ride": 0,
+            },
+            "oldest_open": {"age_s": 40.0, "stage": "placed"},
+            "oldest_unparked": {"age_s": 40.0 if self.snapshots == 1 else None, "stage": None},
+            "http_429s": {"door": 0, "kitchen": 0, "courier": 0},
+            "parked_list": parked,
+            "currently_leased": 0,
+        }
+
+    async def aclose(self) -> None:
+        return None
+
+
+def test_observe_drain_504s_when_waiting_sheds_to_park_and_age_stays() -> None:
+    fake = ShedToParkPipeline()
+    app = create_app(
+        loadgen_settings(drain_poll_s=0.01, drain_timeout_s=0.08),
+        client=fake,
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/observe-drain",
+            json={
+                "baseline_backlog": 0,
+                "baseline_age_s": 1.0,
+                "peak_backlog": 8,
+                "peak_age_s": 40.0,
+                "timeout_s": 0.08,
+            },
+        )
+    assert response.status_code == 504, response.text
+    body = response.json()["detail"]
+    assert body["recovered"] is False
+    assert body["waiting_rose"] is True
+    assert body["backlog_recovered"] is True
+    assert body["age_recovered"] is False
+    assert body["unparked_age_recovered"] is False
+    assert body["parked_count"] == 1
+    assert body["oldest_age_s"] == 40.0
+
+
+class AlreadyAtBaselinePipeline:
+    async def place(self, *, items: list[str], cohort_id: UUID, place_key: str) -> int:
+        del items, cohort_id, place_key
+        return 201
+
+    async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
+        del cohort_id
+        return {
+            "backlog": _empty_backlog(),
+            "oldest_open": {"age_s": 1.0, "stage": "placed"},
+            "oldest_unparked": {"age_s": 1.0, "stage": "placed"},
+            "http_429s": {"door": 0, "kitchen": 0, "courier": 0},
+            "parked_list": [],
+            "currently_leased": 0,
+        }
+
+    async def aclose(self) -> None:
+        return None
+
+
+def test_observe_drain_504s_when_waiting_never_rose() -> None:
+    fake = AlreadyAtBaselinePipeline()
+    app = create_app(
+        loadgen_settings(drain_poll_s=0.01, drain_timeout_s=0.06),
+        client=fake,
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/observe-drain",
+            json={
+                "baseline_backlog": 0,
+                "baseline_age_s": 1.0,
+                "peak_backlog": 0,
+                "peak_age_s": 1.0,
+                "timeout_s": 0.06,
+            },
+        )
+    assert response.status_code == 504, response.text
+    body = response.json()["detail"]
+    assert body["recovered"] is False
+    assert body["waiting_rose"] is False
+
+
+class TimeoutThenMintCohort(TimeoutAfterCommit):
+    """Commit-then-timeout, then mint a new cohort before the replay."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.driver: OpenLoopDriver | None = None
+
+    async def place(self, *, items: list[str], cohort_id: UUID, place_key: str) -> int:
+        self.calls += 1
+        self.place_keys.append(place_key)
+        self.bodies.append(list(items))
+        self.cohorts.append(cohort_id)
+        if self.calls == 1:
+            self.committed += 1
+            assert self.driver is not None
+            self.driver.cohort_id = uuid.uuid4()
+            raise httpx.ReadTimeout("lost after commit")
+        return 201
+
+
+def test_place_timeout_replay_keeps_frozen_cohort_after_mint() -> None:
+    fake = TimeoutThenMintCohort()
+    driver = OpenLoopDriver(loadgen_settings(), fake, rng=random.Random(5))
+    fake.driver = driver
+    original = driver.cohort_id
+
+    asyncio.run(driver._place_one())
+    assert fake.calls == 2
+    assert fake.place_keys[0] == fake.place_keys[1]
+    assert fake.bodies[0] == fake.bodies[1]
+    assert fake.cohorts == [original, original]
+    assert driver.cohort_id != original
+    assert driver.placed == 1
+
+
+def test_calibrate_stops_then_quiesces_before_minting() -> None:
+    fake = LingeringCookPipeline()
+    original = OpenLoopDriver(loadgen_settings(), FakePipeline()).cohort_id
+    driver = OpenLoopDriver(
+        loadgen_settings(drain_timeout_s=1.0, drain_poll_s=0.02),
+        fake,
+    )
+    driver.cohort_id = original
+
+    async def run() -> dict[str, Any]:
+        await driver.start()
+        result = await driver.calibrate(step_s=0.05, start_rps=1.0, factor=2.0, max_rps=1.0)
+        await driver.aclose()
+        return result
+
+    body = asyncio.run(run())
+    assert fake.snapshots >= 4
+    assert body["cohort_id"] != str(original)
+    assert body["prior_quiesce"]["quiesced"] is True
+    assert body["prior_quiesce"]["timed_out"] is False
+
+
+class NeverQuiescePipeline:
+    async def place(self, *, items: list[str], cohort_id: UUID, place_key: str) -> int:
+        del items, cohort_id, place_key
+        return 201
+
+    async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
+        del cohort_id
+        return {
+            "backlog": {
+                "confirm": 0,
+                "poll_cook": 4,
+                "dispatch": 0,
+                "poll_ride": 2,
+            },
+            "oldest_open": {"age_s": 9.0, "stage": "being prepared"},
+            "http_429s": {"door": 0, "kitchen": 0, "courier": 0},
+            "currently_leased": 1,
+        }
+
+    async def aclose(self) -> None:
+        return None
+
+
+def test_stop_endpoint_returns_504_when_pipeline_still_busy() -> None:
+    fake = NeverQuiescePipeline()
+    app = create_app(
+        loadgen_settings(drain_timeout_s=0.06, drain_poll_s=0.01),
+        client=fake,
+    )
+    with TestClient(app) as client:
+        response = client.post("/stop")
+    assert response.status_code == 504, response.text
+    body = response.json()["detail"]
+    assert body["timed_out"] is True
+    assert body["quiesced"] is False
+    assert body["in_service"] == 6
+
+
+def test_oldest_unparked_age_is_none_when_only_parked_work_remains() -> None:
+    snap = {
+        "backlog": _empty_backlog(),
+        "oldest_open": {"age_s": 40.0, "stage": "ready"},
+        "parked_list": [{"order_id": "parked"}],
+        "currently_leased": 0,
+    }
+    assert oldest_unparked_age_s(snap) is None
+    snap["oldest_unparked"] = {"age_s": 4.0, "stage": "confirmed"}
+    assert oldest_unparked_age_s(snap) == 4.0

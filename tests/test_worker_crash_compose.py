@@ -149,6 +149,7 @@ def _wait_parked_dispatch(
     pytest.fail(f"dispatch for {order_id} did not park within {timeout_s}s")
 
 
+@pytest.mark.slow
 def test_scenario_3_kill_resume_then_park_clear_redrive() -> None:
     crash_cohort = uuid.uuid4()
     park_cohort = uuid.uuid4()

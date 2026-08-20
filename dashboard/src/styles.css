@@ -1140,6 +1140,13 @@ button:disabled {
   font-size: 13px;
 }
 
+.calibration-card .load-split {
+  margin: 2px 0 0;
+  color: var(--muted-strong);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .calibration-card button {
   flex: none;
   min-height: 36px;

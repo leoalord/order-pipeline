@@ -43,6 +43,7 @@ PANE_KEYS = (
     "backlog",
     "retry_rate",
     "oldest_open",
+    "oldest_unparked",
     "http_429s",
     "stretching_etas",
     "parked_list",
@@ -231,14 +232,16 @@ def test_scenario_0_steady_walk_and_scenario_1_rush() -> None:
         baseline = _dashboard_snapshot(cohort_id=cohort_id)
         _assert_conservation(baseline)
         base_backlog = backlog_total(baseline)
+        base_waiting = waiting_backlog(baseline)
         base_age = oldest_age_s(baseline) or 0.0
         rush = _http("POST", f"{LOADGEN_URL}/scenario/rush")
         assert rush.status_code == 200, rush.text
 
         peak_backlog = base_backlog
         peak_age = base_age
-        peak_waiting = waiting_backlog(baseline)
+        peak_waiting = base_waiting
         saw_rise_backlog = False
+        saw_rise_waiting = False
         saw_rise_age = False
         accepted_floor = baseline["conservation"]["accepted"]
         rush_deadline = time.monotonic() + 75.0
@@ -256,11 +259,13 @@ def test_scenario_0_steady_walk_and_scenario_1_rush() -> None:
             peak_waiting = max(peak_waiting, waiting_backlog(last_rush))
             if depth > base_backlog + 2:
                 saw_rise_backlog = True
+            if waiting_backlog(last_rush) > base_waiting + 2:
+                saw_rise_waiting = True
             if age > base_age + 1.0:
                 saw_rise_age = True
             time.sleep(POLL_EVERY_S)
 
-        if not saw_rise_backlog or not saw_rise_age:
+        if not saw_rise_backlog or not saw_rise_waiting or not saw_rise_age:
             # The short test calibration deliberately caps its search at 1.2
             # rps. On faster machines that can yield a conservative H whose
             # fixed 2x fallback still sits below the overload line. Preserve
@@ -288,22 +293,28 @@ def test_scenario_0_steady_walk_and_scenario_1_rush() -> None:
                 peak_waiting = max(peak_waiting, waiting_backlog(last_rush))
                 if depth > base_backlog + 2:
                     saw_rise_backlog = True
+                if waiting_backlog(last_rush) > base_waiting + 2:
+                    saw_rise_waiting = True
                 if age > base_age + 1.0:
                     saw_rise_age = True
-                if saw_rise_backlog and saw_rise_age:
+                if saw_rise_backlog and saw_rise_waiting and saw_rise_age:
                     break
                 time.sleep(POLL_EVERY_S)
 
         assert saw_rise_backlog, (
             f"backlog never rose; base={base_backlog} peak={peak_backlog} h={h}"
         )
+        assert saw_rise_waiting, (
+            f"waiting backlog never rose; base={base_waiting} peak={peak_waiting} h={h}"
+        )
+        assert peak_waiting > base_waiting, (peak_waiting, base_waiting)
         assert saw_rise_age, f"oldest-age never rose; base={base_age} peak={peak_age} h={h}"
 
         drain = _http(
             "POST",
             f"{LOADGEN_URL}/observe-drain",
             json={
-                "baseline_backlog": waiting_backlog(baseline),
+                "baseline_backlog": base_waiting,
                 "baseline_age_s": base_age,
                 "peak_backlog": peak_waiting,
                 "peak_age_s": peak_age,
@@ -314,8 +325,21 @@ def test_scenario_0_steady_walk_and_scenario_1_rush() -> None:
         assert drain.status_code == 200, drain.text
         drain_body = drain.json()
         assert drain_body["recovered"] is True, drain_body
+        assert drain_body["waiting_rose"] is True, drain_body
+        assert drain_body["peak_backlog"] > drain_body["baseline_backlog"], drain_body
         assert drain_body["backlog_recovered"] is True, drain_body
-        assert drain_body["age_recovered"] or drain_body["waiting_recovered"], drain_body
+        age_fell = (
+            drain_body["oldest_age_s"] is not None
+            and drain_body["peak_age_s"] is not None
+            and drain_body["oldest_age_s"] < drain_body["peak_age_s"]
+        )
+        unparked_fell = (
+            drain_body.get("oldest_unparked_age_s") is not None
+            and drain_body.get("peak_unparked_age_s") is not None
+            and drain_body["oldest_unparked_age_s"] < drain_body["peak_unparked_age_s"]
+        )
+        assert drain_body["age_recovered"] or drain_body["unparked_age_recovered"], drain_body
+        assert age_fell or unparked_fell, drain_body
         assert "parked_count" in drain_body
         # Parking is shedding, reported separately — not a substitute for drain.
         last_rush = _dashboard_snapshot(cohort_id=cohort_id)
