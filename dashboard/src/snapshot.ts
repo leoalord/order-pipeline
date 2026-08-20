@@ -164,6 +164,7 @@ export type Snapshot = {
   backlog: Record<string, number>;
   retry_rate: number;
   oldest_open: OldestOpen;
+  oldest_unparked?: OldestOpen;
   http_429s: Http429s;
   stretching_etas: StretchingEtas;
   parked_list: ParkedRow[];
@@ -187,8 +188,11 @@ export type LoadgenStatus = {
   h_source?: string;
   calibrated?: boolean;
   rate_rps: number;
+  offered?: number;
   placed: number;
   rejected_429: number;
+  other_http?: number;
+  transport_unknown?: number;
   running: boolean;
 };
 

@@ -46,6 +46,7 @@ REQUIRED_FIELDS = (
     "backlog",
     "retry_rate",
     "oldest_open",
+    "oldest_unparked",
     "http_429s",
     "stretching_etas",
     "parked_list",

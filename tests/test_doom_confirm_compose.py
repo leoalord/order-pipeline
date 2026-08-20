@@ -48,7 +48,7 @@ def test_doomed_ids_fail_through_blackout_while_untagged_confirm_recovers(
     session_factory: sessionmaker[Session],
 ) -> None:
     """Targeted 120s failures coexist with and outlive the 60s global blackout."""
-    _http("POST", f"{LOADGEN_URL}/stop", timeout=15)
+    _http("POST", f"{LOADGEN_URL}/stop", timeout=240)
     mix_off(RSIM_URL, CSIM_URL)
     minted = _http("POST", f"{LOADGEN_URL}/cohort/new")
     assert minted.status_code == 200, minted.text

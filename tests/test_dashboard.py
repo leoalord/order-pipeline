@@ -132,9 +132,15 @@ def test_presenter_rail_posts_existing_scenarios_on_unified_surface() -> None:
     # may not, and the card must not call it calibrated.
     assert "Fallback baseline" in control
     assert "Ready · H" not in control
+    assert "offered {loadgen?.offered ?? 0}" in control
+    assert "other HTTP" in control
+    assert "transport-unknown" in control
+    assert "door 429" in control
     assert "disabled={disabled || !hasBaseline}" in control
     assert "disabled={disabled || !calibrated}" in control
     assert 'loadgen?.h_source === "calibrated"' in control
+    assert '"/loadgen/stop?wait=false"' in control
+    assert "failureMessage(result)" in control
     assert "Promise.allSettled" in control
     assert "start += 8" in control
     assert "redriveWorkItem(job.id)" in control

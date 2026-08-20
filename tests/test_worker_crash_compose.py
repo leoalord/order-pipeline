@@ -149,12 +149,13 @@ def _wait_parked_dispatch(
     pytest.fail(f"dispatch for {order_id} did not park within {timeout_s}s")
 
 
+@pytest.mark.slow
 def test_scenario_3_kill_resume_then_park_clear_redrive() -> None:
     crash_cohort = uuid.uuid4()
     park_cohort = uuid.uuid4()
     killed = False
     try:
-        stopped = _http("POST", f"{LOADGEN_URL}/stop")
+        stopped = _http("POST", f"{LOADGEN_URL}/stop", timeout=240.0)
         assert stopped.status_code == 200, stopped.text
         mix_off()
 

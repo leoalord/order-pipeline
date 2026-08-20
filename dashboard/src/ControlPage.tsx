@@ -64,6 +64,32 @@ async function post(
   return { path, status: response.status, body: text };
 }
 
+function failureMessage(result: LastPost): string {
+  try {
+    const parsed = JSON.parse(result.body) as {
+      detail?: {
+        aborted?: unknown;
+        hint?: unknown;
+        reason?: unknown;
+        diagnostic?: { reason?: unknown };
+      };
+    };
+    const detail = parsed.detail;
+    if (detail) {
+      const reason = detail.hint ?? detail.reason ?? detail.diagnostic?.reason;
+      const parts = [detail.aborted, reason].filter(
+        (value): value is string => typeof value === "string" && value.length > 0,
+      );
+      if (parts.length > 0) {
+        return parts.join(" · ");
+      }
+    }
+  } catch {
+    // Fall back to the raw response for non-JSON proxy and network errors.
+  }
+  return result.body.slice(0, 320);
+}
+
 export function scenarioLabel(scenario: ScenarioId): string {
   return {
     ready: "Ready",
@@ -144,7 +170,7 @@ export function PresenterRail({
       setLast(result);
       if (result.status < 200 || result.status >= 300) {
         throw new Error(
-          `${path} returned ${result.status}: ${result.body.slice(0, 160)}`,
+          `${path} returned ${result.status}: ${failureMessage(result)}`,
         );
       }
       if (scenario) {
@@ -262,7 +288,7 @@ export function PresenterRail({
     const steps: Array<
       [string, Record<string, string | number> | undefined]
     > = [
-      ["/loadgen/stop", undefined],
+      ["/loadgen/stop?wait=false", undefined],
       ["/rsim/admin/faults", { mode: "clear" }],
       ["/csim/admin/faults", { mode: "clear" }],
       [
@@ -285,7 +311,7 @@ export function PresenterRail({
         setLast(result);
         if (result.status < 200 || result.status >= 300) {
           throw new Error(
-            `${path} returned ${result.status}: ${result.body.slice(0, 160)}`,
+            `${path} returned ${result.status}: ${failureMessage(result)}`,
           );
         }
       }
@@ -351,9 +377,16 @@ export function PresenterRail({
           </strong>
           <small>
             {calibrated
-              ? "Recalibrate after changing the worker or dependency topology."
-              : "Normal runs on the fallback. Rush needs a measured H. Calibrate finds the fastest rate that keeps up before kitchen, courier, or the door say busy."}
+              ? "Recalibrate after changing the worker or dependency topology. Recalibrate stops arrivals, quiesces the prior cohort, mints a measurement cohort, and publishes H only after that cohort also releases cook/ride capacity."
+              : "Fresh volume first (`docker compose down -v`). Calibrate quiesces before and after measuring; a bounded timeout fails visibly instead of publishing a contaminated H. Normal runs on the fallback. Rush needs a measured H."}
           </small>
+          <p className="load-split" aria-label="Load outcome split">
+            offered {loadgen?.offered ?? 0}
+            {" · "}201 {loadgen?.placed ?? 0}
+            {" · "}door 429 {loadgen?.rejected_429 ?? 0}
+            {" · "}other HTTP {loadgen?.other_http ?? 0}
+            {" · "}transport-unknown {loadgen?.transport_unknown ?? 0}
+          </p>
         </div>
         <button
           type="button"

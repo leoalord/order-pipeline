@@ -245,6 +245,30 @@ def _sim_lane(
     )
 
 
+def _oldest_open(
+    orders: Sequence[Order],
+    *,
+    at: datetime,
+    exclude: set[UUID] | None = None,
+) -> OldestOpen:
+    """Oldest non-terminal order, optionally skipping parked rows."""
+    skipped = exclude or set()
+    oldest_order: Order | None = None
+    for order in orders:
+        if order.state in TERMINAL_STATES or order.id in skipped:
+            continue
+        if oldest_order is None or _aware(order.accepted_at) < _aware(oldest_order.accepted_at):
+            oldest_order = order
+    return OldestOpen(
+        age_s=(
+            (at - _aware(oldest_order.accepted_at)).total_seconds()
+            if oldest_order is not None
+            else None
+        ),
+        stage=(STATE_TO_STAGE.get(oldest_order.state) if oldest_order is not None else None),
+    )
+
+
 def build_snapshot(
     session: Session,
     *,
@@ -419,20 +443,8 @@ def build_snapshot(
     retries = sum(1 for row in window_attempts if row.id in retry_ids)
     retry_rate = (retries / len(window_attempts)) if window_attempts else 0.0
 
-    oldest_order: Order | None = None
-    for order in orders:
-        if order.state in TERMINAL_STATES:
-            continue
-        if oldest_order is None or _aware(order.accepted_at) < _aware(oldest_order.accepted_at):
-            oldest_order = order
-    oldest_open = OldestOpen(
-        age_s=(
-            (at - _aware(oldest_order.accepted_at)).total_seconds()
-            if oldest_order is not None
-            else None
-        ),
-        stage=(STATE_TO_STAGE.get(oldest_order.state) if oldest_order is not None else None),
-    )
+    oldest_open = _oldest_open(orders, at=at)
+    oldest_unparked = _oldest_open(orders, at=at, exclude=parked_order_ids)
 
     kitchen_429s = courier_429s = 0
     for attempt in attempts:
@@ -535,6 +547,7 @@ def build_snapshot(
         backlog=backlog,
         retry_rate=retry_rate,
         oldest_open=oldest_open,
+        oldest_unparked=oldest_unparked,
         http_429s=Http429s(door=door_429s, kitchen=kitchen_429s, courier=courier_429s),
         stretching_etas=stretching_etas,
         parked_list=parked_list,

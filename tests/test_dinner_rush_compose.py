@@ -15,7 +15,12 @@ import httpx
 import pytest
 
 from order_pipeline.api.snapshot import STAGE_NAMES
-from order_pipeline.loadgen.driver import backlog_total, oldest_age_s, step_is_flat
+from order_pipeline.loadgen.driver import (
+    backlog_total,
+    oldest_age_s,
+    step_is_flat,
+    waiting_backlog,
+)
 from tests.sim_admin import CSIM_URL, RSIM_URL, post_sim_faults
 
 API_URL = "http://localhost:8000"
@@ -38,6 +43,7 @@ PANE_KEYS = (
     "backlog",
     "retry_rate",
     "oldest_open",
+    "oldest_unparked",
     "http_429s",
     "stretching_etas",
     "parked_list",
@@ -155,19 +161,22 @@ def test_faults_3_2_before_calibrate_and_pane_binds_429s() -> None:
 def test_scenario_0_steady_walk_and_scenario_1_rush() -> None:
     """Scenario 0 Pass then scenario 1 Pass. Mix stays on. Stop in finally."""
     _mix_on()
-    _http("POST", f"{LOADGEN_URL}/stop", timeout=15.0)
+    _http("POST", f"{LOADGEN_URL}/stop", timeout=240.0)
     minted = _http("POST", f"{LOADGEN_URL}/cohort/new")
     assert minted.status_code == 200, minted.text
     calibrated = _http(
         "POST",
         f"{LOADGEN_URL}/calibrate",
         json={"step_s": 8, "start_rps": 0.4, "factor": 1.5, "max_rps": 1.2},
-        timeout=70.0,
+        timeout=240.0,
     )
     assert calibrated.status_code == 200, calibrated.text
-    h = calibrated.json()["h"]
+    calibrated_body = calibrated.json()
+    h = calibrated_body["h"]
     assert isinstance(h, (int, float))
     assert h > 0, calibrated.json()
+    assert calibrated_body["h_source"] == "calibrated", calibrated_body
+    assert calibrated_body["measured_h"] == h, calibrated_body
     reset = _http("POST", f"{LOADGEN_URL}/cohort/new")
     assert reset.status_code == 200, reset.text
     cohort_id = reset.json()["cohort_id"]
@@ -226,13 +235,16 @@ def test_scenario_0_steady_walk_and_scenario_1_rush() -> None:
         baseline = _dashboard_snapshot(cohort_id=cohort_id)
         _assert_conservation(baseline)
         base_backlog = backlog_total(baseline)
+        base_waiting = waiting_backlog(baseline)
         base_age = oldest_age_s(baseline) or 0.0
         rush = _http("POST", f"{LOADGEN_URL}/scenario/rush")
         assert rush.status_code == 200, rush.text
 
         peak_backlog = base_backlog
         peak_age = base_age
+        peak_waiting = base_waiting
         saw_rise_backlog = False
+        saw_rise_waiting = False
         saw_rise_age = False
         accepted_floor = baseline["conservation"]["accepted"]
         rush_deadline = time.monotonic() + 75.0
@@ -247,13 +259,16 @@ def test_scenario_0_steady_walk_and_scenario_1_rush() -> None:
             age = oldest_age_s(last_rush) or 0.0
             peak_backlog = max(peak_backlog, depth)
             peak_age = max(peak_age, age)
+            peak_waiting = max(peak_waiting, waiting_backlog(last_rush))
             if depth > base_backlog + 2:
                 saw_rise_backlog = True
+            if waiting_backlog(last_rush) > base_waiting + 2:
+                saw_rise_waiting = True
             if age > base_age + 1.0:
                 saw_rise_age = True
             time.sleep(POLL_EVERY_S)
 
-        if not saw_rise_backlog or not saw_rise_age:
+        if not saw_rise_backlog or not saw_rise_waiting or not saw_rise_age:
             # The short test calibration deliberately caps its search at 1.2
             # rps. On faster machines that can yield a conservative H whose
             # fixed 2x fallback still sits below the overload line. Preserve
@@ -278,58 +293,69 @@ def test_scenario_0_steady_walk_and_scenario_1_rush() -> None:
                 age = oldest_age_s(last_rush) or 0.0
                 peak_backlog = max(peak_backlog, depth)
                 peak_age = max(peak_age, age)
+                peak_waiting = max(peak_waiting, waiting_backlog(last_rush))
                 if depth > base_backlog + 2:
                     saw_rise_backlog = True
+                if waiting_backlog(last_rush) > base_waiting + 2:
+                    saw_rise_waiting = True
                 if age > base_age + 1.0:
                     saw_rise_age = True
-                if saw_rise_backlog and saw_rise_age:
+                if saw_rise_backlog and saw_rise_waiting and saw_rise_age:
                     break
                 time.sleep(POLL_EVERY_S)
 
         assert saw_rise_backlog, (
             f"backlog never rose; base={base_backlog} peak={peak_backlog} h={h}"
         )
+        assert saw_rise_waiting, (
+            f"waiting backlog never rose; base={base_waiting} peak={peak_waiting} h={h}"
+        )
+        assert peak_waiting > base_waiting, (peak_waiting, base_waiting)
         assert saw_rise_age, f"oldest-age never rose; base={base_age} peak={peak_age} h={h}"
 
-        drain_deadline = time.monotonic() + 180.0
-        saw_fall_backlog = False
-        saw_fall_age = False
-        parked_seen = False
-        while time.monotonic() < drain_deadline:
-            last_rush = _dashboard_snapshot(cohort_id=cohort_id)
-            _assert_conservation(last_rush)
-            accepted = last_rush["conservation"]["accepted"]
-            assert accepted >= accepted_floor
-            accepted_floor = accepted
-            depth = backlog_total(last_rush)
-            age = oldest_age_s(last_rush) or 0.0
-            parked = last_rush["parked_list"]
-            assert isinstance(parked, list)
-            if parked:
-                parked_seen = True
-            if depth < peak_backlog:
-                saw_fall_backlog = True
-            if age < peak_age:
-                saw_fall_age = True
-            if saw_fall_backlog and (saw_fall_age or parked_seen):
-                break
-            time.sleep(POLL_EVERY_S)
-
-        assert saw_fall_backlog, (
-            f"backlog never fell; peak={peak_backlog} last={backlog_total(last_rush)}"
+        drain = _http(
+            "POST",
+            f"{LOADGEN_URL}/observe-drain",
+            json={
+                "baseline_backlog": base_waiting,
+                "baseline_age_s": base_age,
+                "peak_backlog": peak_waiting,
+                "peak_age_s": peak_age,
+                "timeout_s": 180.0,
+            },
+            timeout=190.0,
         )
-        # Parked work stays in-flight, so oldest-age can keep climbing. That is
-        # shedding — do not fail the rush because parks appeared.
-        assert saw_fall_age or parked_seen, (
-            f"oldest-age never fell; peak={peak_age} last={oldest_age_s(last_rush)} "
-            f"parked={last_rush['parked_list']}"
+        assert drain.status_code == 200, drain.text
+        drain_body = drain.json()
+        assert drain_body["recovered"] is True, drain_body
+        assert drain_body["waiting_rose"] is True, drain_body
+        assert drain_body["peak_backlog"] > drain_body["baseline_backlog"], drain_body
+        assert drain_body["backlog_recovered"] is True, drain_body
+        age_fell = (
+            drain_body["oldest_age_s"] is not None
+            and drain_body["peak_age_s"] is not None
+            and drain_body["oldest_age_s"] < drain_body["peak_age_s"]
         )
+        unparked_fell = (
+            drain_body.get("oldest_unparked_age_s") is not None
+            and drain_body.get("peak_unparked_age_s") is not None
+            and drain_body["oldest_unparked_age_s"] < drain_body["peak_unparked_age_s"]
+        )
+        assert drain_body["age_recovered"] or drain_body["unparked_age_recovered"], drain_body
+        assert age_fell or unparked_fell, drain_body
+        assert "parked_count" in drain_body
+        # Parking is shedding, reported separately — not a substitute for drain.
+        last_rush = _dashboard_snapshot(cohort_id=cohort_id)
+        _assert_conservation(last_rush)
+        accepted = last_rush["conservation"]["accepted"]
+        assert accepted >= accepted_floor
         assert last_rush["duplicate_effects"] == 0
         assert last_rush["invalid_transitions"] == 0
         assert last_rush["conservation"]["residual"] == 0
         parked = last_rush["parked_list"]
         assert isinstance(parked, list)
+        assert isinstance(drain_body["parked_count"], int)
         for row in parked:
             assert "owner" in row and "reason" in row and "next_action" in row
     finally:
-        _http("POST", f"{LOADGEN_URL}/stop", timeout=15.0)
+        _http("POST", f"{LOADGEN_URL}/stop", timeout=240.0)

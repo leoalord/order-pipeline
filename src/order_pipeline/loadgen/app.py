@@ -117,7 +117,7 @@ def create_app(
     async def calibrate(request: Request) -> dict[str, Any]:
         body = await _read_json_object(request)
         try:
-            return await driver.calibrate(
+            result = await driver.calibrate(
                 step_s=_optional_float(body.get("step_s")),
                 start_rps=_optional_float(body.get("start_rps")),
                 factor=_optional_float(body.get("factor")),
@@ -125,6 +125,9 @@ def create_app(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if result.get("timed_out"):
+            raise HTTPException(status_code=504, detail=result)
+        return result
 
     @app.post("/scenario/steady")
     def steady() -> dict[str, Any]:
@@ -164,9 +167,27 @@ def create_app(
         return plan
 
     @app.post("/stop")
-    async def stop() -> dict[str, Any]:
-        await driver.stop_and_drain()
-        return driver.snapshot_status()
+    async def stop(wait: bool = Query(default=True)) -> dict[str, Any]:
+        if not wait:
+            return await driver.stop_and_drain_http()
+        result = await driver.stop_and_drain()
+        if result.get("timed_out"):
+            raise HTTPException(status_code=504, detail=result)
+        return result
+
+    @app.post("/observe-drain")
+    async def observe_drain(request: Request) -> dict[str, Any]:
+        body = await _read_json_object(request)
+        result = await driver.observe_recovery(
+            baseline_backlog=_optional_int(body.get("baseline_backlog")),
+            baseline_age_s=_optional_float(body.get("baseline_age_s")),
+            peak_backlog=_optional_int(body.get("peak_backlog")),
+            peak_age_s=_optional_float(body.get("peak_age_s")),
+            timeout_s=_optional_float(body.get("timeout_s")),
+        )
+        if not result["recovered"]:
+            raise HTTPException(status_code=504, detail=result)
+        return result
 
     @app.post("/cohort/new")
     async def new_cohort() -> dict[str, str]:
@@ -227,3 +248,11 @@ def _optional_float(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise HTTPException(status_code=400, detail="expected a number")
     return float(value)
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise HTTPException(status_code=400, detail="expected an integer")
+    return int(value)

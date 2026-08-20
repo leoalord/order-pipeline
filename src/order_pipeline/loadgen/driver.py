@@ -6,8 +6,11 @@ import asyncio
 import random
 import time
 import uuid
+from collections import deque
 from typing import Any
 from uuid import UUID
+
+import httpx
 
 from order_pipeline.intake import DEFAULT_COHORT_ID
 from order_pipeline.loadgen.carts import pick_cart
@@ -17,6 +20,15 @@ from order_pipeline.loadgen.settings import LoadgenSettings
 # Confirm / dispatch are waiting to start kitchen or courier work. poll_cook
 # and poll_ride are in-service (cooking or en route) and must not cap H.
 WAITING_WORK_TYPES = ("confirm", "dispatch")
+IN_SERVICE_WORK_TYPES = ("poll_cook", "poll_ride")
+
+_TRANSPORT_UNKNOWN = (
+    httpx.TimeoutException,
+    httpx.TransportError,
+    TimeoutError,
+    ConnectionError,
+    OSError,
+)
 
 
 def backlog_total(snapshot: dict[str, Any]) -> int:
@@ -30,17 +42,31 @@ def backlog_total(snapshot: dict[str, Any]) -> int:
     return total
 
 
-def waiting_backlog(snapshot: dict[str, Any]) -> int:
-    """Work still waiting for a kitchen or courier slot, not in-service polls."""
+def _typed_backlog(snapshot: dict[str, Any], names: tuple[str, ...]) -> int:
     raw = snapshot.get("backlog")
     if not isinstance(raw, dict):
         return 0
     total = 0
-    for name in WAITING_WORK_TYPES:
+    for name in names:
         value = raw.get(name, 0)
         if isinstance(value, int) and not isinstance(value, bool):
             total += value
     return total
+
+
+def waiting_backlog(snapshot: dict[str, Any]) -> int:
+    """Work still waiting for a kitchen or courier slot, not in-service polls."""
+    return _typed_backlog(snapshot, WAITING_WORK_TYPES)
+
+
+def in_service_backlog(snapshot: dict[str, Any]) -> int:
+    """Cook / ride polls that keep running after the place POST returns."""
+    return _typed_backlog(snapshot, IN_SERVICE_WORK_TYPES)
+
+
+def currently_leased(snapshot: dict[str, Any]) -> int:
+    value = snapshot.get("currently_leased")
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 def http_429s_from_snapshot(snapshot: dict[str, Any]) -> dict[str, int]:
@@ -54,12 +80,36 @@ def http_429s_from_snapshot(snapshot: dict[str, Any]) -> dict[str, int]:
     return mix
 
 
-def oldest_age_s(snapshot: dict[str, Any]) -> float | None:
-    raw = snapshot.get("oldest_open")
+def _age_from_open(raw: object) -> float | None:
     if not isinstance(raw, dict):
         return None
     age = raw.get("age_s")
     return float(age) if isinstance(age, (int, float)) and not isinstance(age, bool) else None
+
+
+def oldest_age_s(snapshot: dict[str, Any]) -> float | None:
+    return _age_from_open(snapshot.get("oldest_open"))
+
+
+def oldest_unparked_age_s(snapshot: dict[str, Any]) -> float | None:
+    """Oldest open age excluding parked orders.
+
+    Live snapshots send `oldest_unparked`. Fakes that omit it: no parks →
+    `oldest_open`; only parked work remains → None (shedding, not recovery);
+    mixed leftover → `oldest_open` (parks still pin).
+    """
+    explicit = snapshot.get("oldest_unparked")
+    if isinstance(explicit, dict):
+        return _age_from_open(explicit)
+    if parked_count(snapshot) == 0:
+        return oldest_age_s(snapshot)
+    if (
+        waiting_backlog(snapshot) == 0
+        and in_service_backlog(snapshot) == 0
+        and currently_leased(snapshot) == 0
+    ):
+        return None
+    return oldest_age_s(snapshot)
 
 
 def parked_count(snapshot: dict[str, Any]) -> int:
@@ -95,6 +145,10 @@ def step_is_flat(*, start_backlog: int, end_backlog: int) -> bool:
     return end_backlog <= start_backlog + slack
 
 
+def is_transport_unknown(exc: BaseException) -> bool:
+    return isinstance(exc, _TRANSPORT_UNKNOWN)
+
+
 class OpenLoopDriver:
     """Target-rate arrivals. HTTP completion never paces the next fire."""
 
@@ -114,15 +168,50 @@ class OpenLoopDriver:
         # Callers that size pressure off H need to know which one they have.
         self.h_source: str = "fallback"
         self.rate_rps = 0.0
+        self.offered = 0
         self.placed = 0
         self.rejected_429 = 0
-        self.other_status = 0
+        self.other_http = 0
+        self.transport_unknown = 0
         self._running = False
         self._loop_task: asyncio.Task[None] | None = None
         self._rush_task: asyncio.Task[None] | None = None
         self._in_flight: set[asyncio.Task[None]] = set()
         self._rate_generation = 0
         self._rate_changed = asyncio.Event()
+        self._rush_baseline_backlog: int | None = None
+        self._rush_baseline_age_s: float | None = None
+
+    def load_counters(self) -> dict[str, int]:
+        return {
+            "offered": self.offered,
+            "accepted": self.placed,
+            "door_429": self.rejected_429,
+            "other_http": self.other_http,
+            "transport_unknown": self.transport_unknown,
+        }
+
+    @staticmethod
+    def _empty_load_counters() -> dict[str, int]:
+        return {
+            "offered": 0,
+            "accepted": 0,
+            "door_429": 0,
+            "other_http": 0,
+            "transport_unknown": 0,
+        }
+
+    def _reset_load_counters(self) -> None:
+        self.offered = 0
+        self.placed = 0
+        self.rejected_429 = 0
+        self.other_http = 0
+        self.transport_unknown = 0
+
+    def _activate_fallback_h(self) -> None:
+        """Keep Normal usable without presenting a failed calibration as measured."""
+        self.h = self.settings.default_h
+        self.h_source = "fallback"
 
     def snapshot_status(self) -> dict[str, Any]:
         return {
@@ -131,8 +220,11 @@ class OpenLoopDriver:
             "h_source": self.h_source,
             "calibrated": self.h_source == "calibrated" and (self.h or 0.0) > 0,
             "rate_rps": self.rate_rps,
+            "offered": self.offered,
             "placed": self.placed,
             "rejected_429": self.rejected_429,
+            "other_http": self.other_http,
+            "transport_unknown": self.transport_unknown,
             "running": self.rate_rps > 0,
         }
 
@@ -168,6 +260,7 @@ class OpenLoopDriver:
 
     def new_cohort(self) -> UUID:
         self.cohort_id = uuid.uuid4()
+        self._reset_load_counters()
         return self.cohort_id
 
     def set_rate(self, rps: float) -> None:
@@ -184,12 +277,123 @@ class OpenLoopDriver:
             self._rush_task.cancel()
             self._rush_task = None
 
-    async def stop_and_drain(self) -> None:
-        """Stop arrivals and wait for in-flight POSTs so later tests see a quiet API."""
-        self.stop()
+    async def _drain_http(self) -> None:
+        """Await dispatched POSTs. stop() is synchronous, so this list has no leak."""
         pending = list(self._in_flight)
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
+
+    def _pipeline_busy(self, snapshot: dict[str, Any]) -> bool:
+        return (
+            waiting_backlog(snapshot) > 0
+            or in_service_backlog(snapshot) > 0
+            or currently_leased(snapshot) > 0
+        )
+
+    def _activity_from_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "waiting_backlog": waiting_backlog(snapshot),
+            "in_service": in_service_backlog(snapshot),
+            "currently_leased": currently_leased(snapshot),
+            "parked": parked_count(snapshot),
+            "oldest_age_s": oldest_age_s(snapshot),
+        }
+
+    def _quiesce_summary(self, result: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "quiesced": result.get("quiesced"),
+            "timed_out": result.get("timed_out"),
+            "reason": result.get("reason"),
+            "waiting_backlog": result.get("waiting_backlog"),
+            "in_service": result.get("in_service"),
+            "currently_leased": result.get("currently_leased"),
+            "snapshot_errors": result.get("snapshot_errors", 0),
+            "last_snapshot_error": result.get("last_snapshot_error"),
+        }
+
+    async def _quiesce_pipeline(self, *, timeout_s: float) -> dict[str, Any]:
+        """Wait for waiting + cook/ride + leased work on the active cohort."""
+        deadline = time.monotonic() + timeout_s
+        last: dict[str, Any] = {
+            "waiting_backlog": 0,
+            "in_service": 0,
+            "currently_leased": 0,
+            "parked": 0,
+            "oldest_age_s": None,
+        }
+        snapshot_errors = 0
+        last_snapshot_error: str | None = None
+        while True:
+            try:
+                snapshot = await self.client.snapshot(self.cohort_id)
+            except Exception as exc:
+                snapshot_errors += 1
+                last_snapshot_error = f"{type(exc).__name__}: {exc}"
+            else:
+                last_snapshot_error = None
+                last = self._activity_from_snapshot(snapshot)
+                if not self._pipeline_busy(snapshot):
+                    return {
+                        "quiesced": True,
+                        "timed_out": False,
+                        "reason": None,
+                        "snapshot_errors": snapshot_errors,
+                        "last_snapshot_error": last_snapshot_error,
+                        **last,
+                    }
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(self.settings.drain_poll_s, remaining))
+        if last_snapshot_error is not None:
+            reason = (
+                "pipeline quiescence could not be verified: snapshot unavailable "
+                f"({last_snapshot_error})"
+            )
+        else:
+            reason = (
+                "pipeline still busy after stop: waiting "
+                f"{last['waiting_backlog']}, in_service {last['in_service']}, "
+                f"leased {last['currently_leased']}"
+            )
+        return {
+            "quiesced": False,
+            "timed_out": True,
+            "reason": reason,
+            "snapshot_errors": snapshot_errors,
+            "last_snapshot_error": last_snapshot_error,
+            **last,
+        }
+
+    async def stop_and_drain(self, *, timeout_s: float | None = None) -> dict[str, Any]:
+        """Stop arrivals, finish in-flight POSTs, then wait for pipeline work.
+
+        HTTP drain is not enough: cook and ride keep running after the place
+        POST returns. Bound the wait and return a visible failure if the
+        cohort does not quiesce.
+        """
+        limit = self.settings.drain_timeout_s if timeout_s is None else timeout_s
+        self.stop()
+        await self._drain_http()
+        pipeline = await self._quiesce_pipeline(timeout_s=limit)
+        status = self.snapshot_status()
+        status.update(pipeline)
+        return status
+
+    async def stop_and_drain_http(self) -> dict[str, Any]:
+        """Fast abort for Reset: stop arrivals and resolve POSTs, but do not await rails."""
+        self.stop()
+        await self._drain_http()
+        status = self.snapshot_status()
+        status.update(
+            {
+                "quiesced": None,
+                "timed_out": False,
+                "reason": None,
+                "waited_for_pipeline": False,
+            }
+        )
+        return status
 
     def steady_rps(self) -> float:
         if self.h is None or self.h <= 0:
@@ -199,6 +403,8 @@ class OpenLoopDriver:
     def rush_rps(self, mult: float = 1.0) -> float:
         if self.h is None or self.h <= 0:
             raise RuntimeError("calibrate did not find a sustainable H")
+        if self.h_source != "calibrated":
+            raise RuntimeError("rush requires a measured calibration H")
         return self.settings.rush_multiplier * self.h * mult
 
     async def _run_loop(self) -> None:
@@ -238,27 +444,70 @@ class OpenLoopDriver:
             task.add_done_callback(self._in_flight.discard)
             next_due += 1.0 / rate
 
+    async def _place_once(self, *, items: list[str], place_key: str, cohort_id: UUID) -> int:
+        return await self.client.place(
+            items=items,
+            cohort_id=cohort_id,
+            place_key=place_key,
+        )
+
     async def _place_one(self) -> None:
         items = pick_cart(
             self.rng,
             one_item_pct=self.settings.one_item_pct,
             two_item_pct=self.settings.two_item_pct,
         )
-        try:
-            status = await self.client.place(
-                items=items,
-                cohort_id=self.cohort_id,
-                place_key=str(uuid.uuid4()),
-            )
-        except Exception:
-            self.other_status += 1
+        place_key = str(uuid.uuid4())
+        # Freeze the body: cohort_id is in the intake fingerprint. A live
+        # Recalibrate / New cohort must not change the replay payload.
+        cohort_id = self.cohort_id
+        self.offered += 1
+        attempts = 1 + self.settings.place_timeout_retries
+        status: int | None = None
+        for attempt in range(attempts):
+            try:
+                status = await self._place_once(
+                    items=items,
+                    place_key=place_key,
+                    cohort_id=cohort_id,
+                )
+                break
+            except Exception as exc:
+                if not is_transport_unknown(exc):
+                    raise
+                if attempt + 1 < attempts:
+                    continue
+                if cohort_id == self.cohort_id:
+                    self.transport_unknown += 1
+                return
+        # New cohort resets the visible counters. A late completion from the
+        # frozen old cohort must not leak into the new cohort's evidence.
+        if cohort_id != self.cohort_id:
             return
         if status == 201:
             self.placed += 1
         elif status == 429:
             self.rejected_429 += 1
         else:
-            self.other_status += 1
+            self.other_http += 1
+
+    def _step_counters(self, start: dict[str, int], end: dict[str, int]) -> dict[str, int]:
+        return {name: max(0, end[name] - start[name]) for name in start}
+
+    def _dirty_diagnostic(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "parked_count": parked_count(snapshot),
+            "failed_count": failed_count(snapshot),
+            "no_progress_count": no_progress_count(snapshot),
+            "oldest_age_s": oldest_age_s(snapshot),
+            "waiting_backlog": waiting_backlog(snapshot),
+            "hint": (
+                "leftover parked/stalled work or a fat sim ledger will pin "
+                "oldest-age and walk the ramp to h=0; run "
+                "`docker compose down -v && docker compose up --wait` "
+                "then calibrate again"
+            ),
+        }
 
     async def calibrate(
         self,
@@ -275,7 +524,32 @@ class OpenLoopDriver:
         cap = self.settings.calibrate_max_rps if max_rps is None else max_rps
         if step <= 0 or rps <= 0 or grow <= 1.0 or cap < rps:
             raise ValueError("invalid calibrate knobs")
-        await self.stop_and_drain()
+        # Stop first so the open-loop clock cannot fire while HTTP drains.
+        # Quiesce the old cohort (cook/ride still occupy pans/bikes) before
+        # minting; a new cohort hides leftover parked age but not rail occupancy.
+        prior = await self.stop_and_drain()
+        prior_summary = self._quiesce_summary(prior)
+        if prior.get("timed_out"):
+            self._activate_fallback_h()
+            return {
+                "h": self.h,
+                "h_source": self.h_source,
+                "measured_h": None,
+                "cohort_id": str(self.cohort_id),
+                "http_429s": {"door": 0, "kitchen": 0, "courier": 0},
+                "door_first": False,
+                "downstream_429_observed": False,
+                "oldest_age_s": prior.get("oldest_age_s"),
+                "steps": [],
+                "hint": prior.get("reason"),
+                "aborted": "prior_quiesce_timeout",
+                "diagnostic": prior_summary,
+                "prior_quiesce": prior_summary,
+                "final_quiesce": None,
+                "timed_out": True,
+                **self._empty_load_counters(),
+            }
+        self.new_cohort()
         steps: list[dict[str, Any]] = []
         h = 0.0
         overload_seen = False
@@ -283,13 +557,26 @@ class OpenLoopDriver:
         first_brake: str | None = None
         last_mix = {"door": 0, "kitchen": 0, "courier": 0}
         last_oldest: float | None = None
+        last_snapshot: dict[str, Any] = {}
+        aborted: str | None = None
+        diagnostic: dict[str, Any] | None = None
+        zero_h_steps = 0
         while rps <= cap + 1e-9:
+            before = self.load_counters()
             self.set_rate(rps)
             warmup = min(max(3.0, step * 0.4), step * 0.5)
             await asyncio.sleep(warmup)
             first = await self.client.snapshot(self.cohort_id)
             await asyncio.sleep(max(0.0, step - warmup))
+            # Close the step's arrival window before reading its outcomes.
+            # Otherwise a request dispatched near the boundary can time out
+            # after this step has already been certified transport-clean.
+            self.stop()
+            await self._drain_http()
             last = await self.client.snapshot(self.cohort_id)
+            last_snapshot = last
+            after = self.load_counters()
+            counters = self._step_counters(before, after)
             start_backlog = waiting_backlog(first)
             end_backlog = waiting_backlog(last)
             first_mix = http_429s_from_snapshot(first)
@@ -305,12 +592,16 @@ class OpenLoopDriver:
             no_new_parks = parked_count(last) <= parked_count(first)
             no_new_failures = failed_count(last) <= failed_count(first)
             no_new_stalls = no_progress_count(last) <= no_progress_count(first)
+            transport_clean = counters["transport_unknown"] == 0
+            other_http_clean = counters["other_http"] == 0
             flat = (
                 backlog_flat
                 and oldest_within_bound
                 and no_new_parks
                 and no_new_failures
                 and no_new_stalls
+                and transport_clean
+                and other_http_clean
             )
             steps.append(
                 {
@@ -326,7 +617,10 @@ class OpenLoopDriver:
                     "no_new_parks": no_new_parks,
                     "no_new_failures": no_new_failures,
                     "no_new_stalls": no_new_stalls,
+                    "transport_clean": transport_clean,
+                    "other_http_clean": other_http_clean,
                     "flat": flat,
+                    **counters,
                 }
             )
             last_mix = mix
@@ -346,33 +640,75 @@ class OpenLoopDriver:
                     )
             if flat and not overload_seen and not downstream_429_this_step and not door_observed:
                 h = rps
+                zero_h_steps = 0
             else:
                 overload_seen = True
+                if h <= 0:
+                    zero_h_steps += 1
             downstream_429_observed = downstream_429_observed or (downstream_429_this_step)
             if overload_seen and (downstream_429_observed or door_observed):
                 break
+            if h <= 0 and zero_h_steps >= self.settings.calibrate_stale_abort_steps:
+                aborted = "h_still_zero"
+                diagnostic = self._dirty_diagnostic(last)
+                break
             rps = round(rps * grow, 4)
-        await self.stop_and_drain()
-        self.h = h
-        self.h_source = "calibrated"
+        # Do not publish H while calibration traffic still occupies pans,
+        # bikes, or worker leases. The presenter mints the demo cohort next.
+        final = await self._quiesce_pipeline(timeout_s=self.settings.drain_timeout_s)
+        final_summary = self._quiesce_summary(final)
+        measured_h = h if h > 0 else None
+        if final.get("timed_out"):
+            aborted = "final_quiesce_timeout"
+            diagnostic = final_summary
+        calibration_succeeded = measured_h is not None and aborted is None
+        if calibration_succeeded:
+            self.h = measured_h
+            self.h_source = "calibrated"
+        else:
+            self._activate_fallback_h()
         # Snapshot counters are cohort-cumulative. Restrict this decision to
         # brake events observed during this calibration so an earlier run
         # cannot poison the result after the operator raises the door cap.
         door_first = first_brake == "door"
-        return {
-            "h": h,
+        result: dict[str, Any] = {
+            "h": self.h,
+            "h_source": self.h_source,
+            "measured_h": measured_h,
+            "cohort_id": str(self.cohort_id),
             "http_429s": last_mix,
             "door_first": door_first,
             "downstream_429_observed": downstream_429_observed,
             "oldest_age_s": last_oldest,
             "steps": steps,
-            "hint": ("raise API_ACCEPT_CONCURRENCY and recalibrate" if door_first else None),
+            "hint": (
+                final.get("reason")
+                if final.get("timed_out")
+                else ("raise API_ACCEPT_CONCURRENCY and recalibrate" if door_first else None)
+            ),
+            "aborted": aborted,
+            "diagnostic": diagnostic,
+            "prior_quiesce": prior_summary,
+            "final_quiesce": final_summary,
+            "timed_out": bool(final.get("timed_out")),
+            **self.load_counters(),
         }
+        if aborted is not None and last_snapshot:
+            result["hint"] = (
+                diagnostic.get("hint", result["hint"]) if diagnostic is not None else result["hint"]
+            )
+        return result
 
     async def start_rush(self, *, mult: float = 1.0) -> dict[str, Any]:
         """60s @ 1.5×H×mult then drain to 0.4×H. Does not replay a baseline minute."""
         peak = self.rush_rps(mult)
         drain = self.steady_rps()
+        try:
+            snap = await self.client.snapshot(self.cohort_id)
+        except Exception:
+            snap = {}
+        self._rush_baseline_backlog = waiting_backlog(snap)
+        self._rush_baseline_age_s = oldest_age_s(snap) or 0.0
         self.set_rate(peak)
         if self._rush_task is not None:
             self._rush_task.cancel()
@@ -382,7 +718,214 @@ class OpenLoopDriver:
             "drain_rps": drain,
             "duration_s": self.settings.rush_duration_s,
             "mult": mult,
+            "baseline_backlog": self._rush_baseline_backlog,
+            "baseline_age_s": self._rush_baseline_age_s,
         }
+
+    async def observe_recovery(
+        self,
+        *,
+        baseline_backlog: int | None = None,
+        baseline_age_s: float | None = None,
+        peak_backlog: int | None = None,
+        peak_age_s: float | None = None,
+        timeout_s: float | None = None,
+    ) -> dict[str, Any]:
+        """Wait for a sustained waiting-backlog / oldest-age drain.
+
+        Parking is shedding, not recovery: parked rows are reported and never
+        satisfy the predicate. A recorded waiting peak above baseline is
+        required, then backlog and either total or parked-excluded age must
+        recover. Parking is never a substitute for backlog recovery.
+        """
+        base_backlog = self._rush_baseline_backlog if baseline_backlog is None else baseline_backlog
+        base_age = self._rush_baseline_age_s if baseline_age_s is None else baseline_age_s
+        limit = self.settings.drain_timeout_s if timeout_s is None else timeout_s
+        deadline = time.monotonic() + limit
+        snapshot_errors = 0
+        last_snapshot_error: str | None = None
+        while base_backlog is None or base_age is None:
+            try:
+                snap = await self.client.snapshot(self.cohort_id)
+            except Exception as exc:
+                snapshot_errors += 1
+                last_snapshot_error = f"{type(exc).__name__}: {exc}"
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    base_backlog = 0 if base_backlog is None else base_backlog
+                    base_age = 0.0 if base_age is None else base_age
+                    break
+                await asyncio.sleep(min(self.settings.drain_poll_s, remaining))
+                continue
+            last_snapshot_error = None
+            if base_backlog is None:
+                base_backlog = waiting_backlog(snap)
+            if base_age is None:
+                base_age = oldest_age_s(snap) or 0.0
+        streak_k = self.settings.recovery_streak
+        backlog_slack = self.settings.recovery_backlog_slack
+        age_slack = self.settings.recovery_age_slack_s
+        seen_peak_backlog = base_backlog if peak_backlog is None else peak_backlog
+        seen_peak_age = base_age if peak_age_s is None else peak_age_s
+        seen_peak_unparked = seen_peak_age
+        prev_waiting: int | None = None
+        backlog_streak = 0
+        age_window: deque[float] = deque(maxlen=streak_k)
+        unparked_window: deque[float] = deque(maxlen=streak_k)
+        parked_seen = False
+        last_waiting = base_backlog
+        last_age = base_age
+        last_unparked: float | None = base_age
+        last_parked = 0
+        samples = 0
+        while time.monotonic() < deadline:
+            try:
+                snapshot = await self.client.snapshot(self.cohort_id)
+            except Exception as exc:
+                snapshot_errors += 1
+                last_snapshot_error = f"{type(exc).__name__}: {exc}"
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(self.settings.drain_poll_s, remaining))
+                continue
+            last_snapshot_error = None
+            samples += 1
+            waiting = waiting_backlog(snapshot)
+            age = oldest_age_s(snapshot)
+            unparked_age = oldest_unparked_age_s(snapshot)
+            parked = parked_count(snapshot)
+            last_waiting = waiting
+            last_age = age if age is not None else 0.0
+            last_unparked = unparked_age
+            last_parked = parked
+            if parked > 0:
+                parked_seen = True
+            seen_peak_backlog = max(seen_peak_backlog, waiting)
+            if age is not None:
+                seen_peak_age = max(seen_peak_age, age)
+            if unparked_age is not None:
+                seen_peak_unparked = max(seen_peak_unparked, unparked_age)
+            if prev_waiting is not None and waiting < prev_waiting:
+                backlog_streak += 1
+            else:
+                backlog_streak = 0
+            if age is None:
+                age_window.clear()
+            else:
+                age_window.append(age)
+            if unparked_age is None:
+                unparked_window.clear()
+            else:
+                unparked_window.append(unparked_age)
+            prev_waiting = waiting
+            waiting_rose = seen_peak_backlog > base_backlog
+            backlog_at_baseline = waiting <= base_backlog + backlog_slack
+            age_at_baseline = (age is None and parked == 0) or (
+                age is not None and age <= base_age + age_slack
+            )
+            unparked_at_baseline = (unparked_age is None and parked == 0) or (
+                unparked_age is not None and unparked_age <= base_age + age_slack
+            )
+            age_drop_sustained = self._age_window_recovered(
+                age_window,
+                peak=seen_peak_age,
+                minimum_drop=age_slack,
+                streak_k=streak_k,
+            )
+            unparked_drop_sustained = self._age_window_recovered(
+                unparked_window,
+                peak=seen_peak_unparked,
+                minimum_drop=age_slack,
+                streak_k=streak_k,
+            )
+            backlog_recovered = backlog_at_baseline or backlog_streak >= streak_k
+            age_recovered = age_at_baseline or age_drop_sustained
+            unparked_age_recovered = unparked_at_baseline or unparked_drop_sustained
+            recovered = (
+                waiting_rose and backlog_recovered and (age_recovered or unparked_age_recovered)
+            )
+            if recovered:
+                return {
+                    "recovered": True,
+                    "timed_out": False,
+                    "waiting_rose": waiting_rose,
+                    "backlog_recovered": backlog_recovered,
+                    "age_recovered": age_recovered,
+                    "unparked_age_recovered": unparked_age_recovered,
+                    "waiting_recovered": backlog_recovered,
+                    "parked_seen": parked_seen,
+                    "parked_count": parked,
+                    "baseline_backlog": base_backlog,
+                    "baseline_age_s": base_age,
+                    "peak_backlog": seen_peak_backlog,
+                    "peak_age_s": seen_peak_age,
+                    "peak_unparked_age_s": seen_peak_unparked,
+                    "waiting_backlog": waiting,
+                    "oldest_age_s": age,
+                    "oldest_unparked_age_s": unparked_age,
+                    "samples": samples,
+                    "snapshot_errors": snapshot_errors,
+                    "last_snapshot_error": last_snapshot_error,
+                    "reason": None,
+                }
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(self.settings.drain_poll_s, remaining))
+        last_unparked_value = last_unparked if last_unparked is not None else 0.0
+        return {
+            "recovered": False,
+            "timed_out": True,
+            "waiting_rose": seen_peak_backlog > base_backlog,
+            "backlog_recovered": last_waiting <= base_backlog + backlog_slack,
+            "age_recovered": last_age <= base_age + age_slack,
+            "unparked_age_recovered": last_unparked is not None
+            and last_unparked <= base_age + age_slack,
+            "waiting_recovered": last_waiting <= base_backlog + backlog_slack,
+            "parked_seen": parked_seen,
+            "parked_count": last_parked,
+            "baseline_backlog": base_backlog,
+            "baseline_age_s": base_age,
+            "peak_backlog": seen_peak_backlog,
+            "peak_age_s": seen_peak_age,
+            "peak_unparked_age_s": seen_peak_unparked,
+            "waiting_backlog": last_waiting,
+            "oldest_age_s": last_age,
+            "oldest_unparked_age_s": last_unparked,
+            "samples": samples,
+            "snapshot_errors": snapshot_errors,
+            "last_snapshot_error": last_snapshot_error,
+            "reason": (
+                (
+                    f"snapshot unavailable: {last_snapshot_error}; "
+                    if last_snapshot_error is not None
+                    else ""
+                )
+                + "drain did not sustain waiting-backlog and oldest-age improvement; "
+                f"waiting={last_waiting} peak_waiting={seen_peak_backlog} "
+                f"age={last_age} peak_age={seen_peak_age} "
+                f"unparked_age={last_unparked_value} parked={last_parked}"
+            ),
+        }
+
+    @staticmethod
+    def _age_window_recovered(
+        samples: deque[float],
+        *,
+        peak: float,
+        minimum_drop: float,
+        streak_k: int,
+    ) -> bool:
+        """Require a material peak-to-window drop plus net decline across the window."""
+        if len(samples) < streak_k:
+            return False
+        threshold = peak - minimum_drop
+        if any(value > threshold for value in samples):
+            return False
+        if streak_k == 1:
+            return samples[-1] < peak
+        return samples[-1] < samples[0]
 
     async def _rush_then_drain(self, drain_rps: float) -> None:
         try:

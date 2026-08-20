@@ -11,7 +11,6 @@ import httpx
 import pytest
 
 from order_pipeline.api.snapshot import BACKLOG_TYPES
-from order_pipeline.loadgen.driver import backlog_total
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPOSE = (REPO_ROOT / "docker-compose.yml").read_text()
@@ -25,13 +24,13 @@ DINNER_RUSH_KEYS = (
     "backlog",
     "retry_rate",
     "oldest_open",
+    "oldest_unparked",
     "http_429s",
     "stretching_etas",
     "parked_list",
     "sim_http",
     "no_progress_beyond_threshold",
 )
-CALIBRATION_DRAIN_TIMEOUT_S = 240.0
 
 
 def _compose_stdout(*args: str, timeout: float = 30.0) -> str:
@@ -59,24 +58,6 @@ def _http(
         return httpx.request(method, url, json=json, timeout=timeout)
     except httpx.RequestError as exc:
         pytest.fail(f"request failed {method} {url}: {exc}")
-
-
-def _wait_cohort_backlog_clear(cohort_id: str) -> None:
-    """Let accepted calibration work release sim capacity before later tests."""
-    deadline = time.monotonic() + CALIBRATION_DRAIN_TIMEOUT_S
-    last: dict[str, Any] | None = None
-    while time.monotonic() < deadline:
-        response = _http("GET", f"{API_URL}/snapshot?cohort_id={cohort_id}")
-        assert response.status_code == 200, response.text
-        last = response.json()
-        assert isinstance(last, dict)
-        if backlog_total(last) == 0 and last["currently_leased"] == 0:
-            return
-        time.sleep(1.0)
-    pytest.fail(
-        f"calibration cohort did not release active work within "
-        f"{CALIBRATION_DRAIN_TIMEOUT_S}s: {last}"
-    )
 
 
 def test_compose_two_worker_replicas_no_host_8083() -> None:
@@ -113,6 +94,8 @@ def test_snapshot_json_has_dinner_rush_keys() -> None:
     assert set(body["http_429s"]) == {"door", "kitchen", "courier"}
     oldest = body["oldest_open"]
     assert "age_s" in oldest and "stage" in oldest
+    unparked = body["oldest_unparked"]
+    assert "age_s" in unparked and "stage" in unparked
     assert set(body["accept_reject"]) == {"accepted", "rejected"}
     assert isinstance(body["parked_list"], list)
     assert set(body["sim_http"]) == {"restaurant", "courier"}
@@ -147,13 +130,15 @@ def test_calibrate_reports_h_and_429_mix() -> None:
             "POST",
             f"{LOADGEN_URL}/calibrate",
             json={"step_s": 6, "start_rps": 0.5, "factor": 2.0, "max_rps": 8.0},
-            timeout=60.0,
+            timeout=240.0,
         )
         assert calibrated.status_code == 200, calibrated.text
         body = calibrated.json()
         assert "h" in body
         assert isinstance(body["h"], (int, float))
         assert body["h"] > 0
+        assert body["h_source"] == "calibrated"
+        assert body["measured_h"] == body["h"]
         assert body["downstream_429_observed"] is True
         mix = body["http_429s"]
         assert set(mix) == {"door", "kitchen", "courier"}
@@ -161,9 +146,13 @@ def test_calibrate_reports_h_and_429_mix() -> None:
             assert isinstance(mix[key], int)
             assert mix[key] >= 0
         assert mix["kitchen"] + mix["courier"] > 0
+        assert body["cohort_id"] != cohort_id
+        assert set(body).issuperset(
+            {"offered", "accepted", "door_429", "other_http", "transport_unknown"}
+        )
         elapsed = time.monotonic() - started
-        assert elapsed < 55, f"calibrate took {elapsed:.1f}s"
+        assert elapsed < 235, f"calibrate took {elapsed:.1f}s"
     finally:
-        stopped = _http("POST", f"{LOADGEN_URL}/stop")
+        stopped = _http("POST", f"{LOADGEN_URL}/stop", timeout=240.0)
         assert stopped.status_code == 200, stopped.text
-        _wait_cohort_backlog_clear(cohort_id)
+        assert stopped.json()["quiesced"] is True, stopped.json()

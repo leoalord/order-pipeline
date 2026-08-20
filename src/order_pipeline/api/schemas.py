@@ -189,6 +189,7 @@ class SnapshotResponse(BaseModel):
     backlog: dict[str, int]
     retry_rate: float
     oldest_open: OldestOpen
+    oldest_unparked: OldestOpen
     http_429s: Http429s
     stretching_etas: StretchingEtas
     parked_list: list[ParkedRow]
