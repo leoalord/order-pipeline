@@ -187,8 +187,11 @@ export type LoadgenStatus = {
   h_source?: string;
   calibrated?: boolean;
   rate_rps: number;
+  offered?: number;
   placed: number;
   rejected_429: number;
+  other_http?: number;
+  transport_unknown?: number;
   running: boolean;
 };
 

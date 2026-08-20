@@ -8,6 +8,7 @@ import time
 from typing import Any
 from uuid import UUID
 
+import httpx
 from fastapi.testclient import TestClient
 
 from order_pipeline.loadgen.app import create_app
@@ -16,6 +17,7 @@ from order_pipeline.loadgen.driver import (
     OpenLoopDriver,
     backlog_total,
     http_429s_from_snapshot,
+    in_service_backlog,
     step_is_flat,
     waiting_backlog,
 )
@@ -23,17 +25,29 @@ from order_pipeline.loadgen.settings import LoadgenSettings
 from order_pipeline.menu import MENU_ITEM_IDS
 
 
+def loadgen_settings(**kwargs: Any) -> LoadgenSettings:
+    kwargs.setdefault("drain_timeout_s", 0.2)
+    kwargs.setdefault("drain_poll_s", 0.01)
+    kwargs.setdefault("recovery_streak", 3)
+    return LoadgenSettings(**kwargs)
+
+
+def _empty_backlog() -> dict[str, int]:
+    return {"confirm": 0, "poll_cook": 0, "dispatch": 0, "poll_ride": 0}
+
+
 class FakePipeline:
     def __init__(self, *, place_status: int = 201, delay_s: float = 0.0) -> None:
         self.place_status = place_status
         self.delay_s = delay_s
         self.places: list[tuple[list[str], UUID]] = []
+        self.place_keys: list[str] = []
         self.snapshots = 0
         self.backlog_end = 0
 
     async def place(self, *, items: list[str], cohort_id: UUID, place_key: str) -> int:
-        del place_key
         self.places.append((list(items), cohort_id))
+        self.place_keys.append(place_key)
         if self.delay_s > 0:
             await asyncio.sleep(self.delay_s)
         return self.place_status
@@ -51,6 +65,7 @@ class FakePipeline:
             },
             "oldest_open": {"age_s": 1.0, "stage": "placed"},
             "http_429s": {"door": 0, "kitchen": 2, "courier": 1},
+            "currently_leased": 0,
         }
 
     async def aclose(self) -> None:
@@ -83,12 +98,13 @@ def test_step_flatness_and_snapshot_helpers() -> None:
     }
     assert backlog_total(snap) == 6
     assert waiting_backlog(snap) == 3
+    assert in_service_backlog(snap) == 3
     assert http_429s_from_snapshot(snap) == {"door": 1, "kitchen": 4, "courier": 2}
 
 
 def test_open_loop_does_not_slow_on_429() -> None:
     fake = FakePipeline(place_status=429, delay_s=0.15)
-    settings = LoadgenSettings(calibrate_step_s=0.2)
+    settings = loadgen_settings(calibrate_step_s=0.2)
     driver = OpenLoopDriver(settings, fake, rng=random.Random(1))
 
     async def run() -> None:
@@ -107,7 +123,7 @@ def test_open_loop_does_not_slow_on_429() -> None:
 
 
 def test_conservative_default_h_allows_scenarios_before_calibration() -> None:
-    driver = OpenLoopDriver(LoadgenSettings(default_h=0.25), FakePipeline())
+    driver = OpenLoopDriver(loadgen_settings(default_h=0.25), FakePipeline())
 
     assert driver.h == 0.25
     assert driver.steady_rps() == 0.1
@@ -116,7 +132,7 @@ def test_conservative_default_h_allows_scenarios_before_calibration() -> None:
 
 def test_status_reports_the_fallback_h_as_unmeasured() -> None:
     """Rush sizes its peak off H, so callers must be able to tell a guess from a measurement."""
-    driver = OpenLoopDriver(LoadgenSettings(default_h=0.25), FakePipeline())
+    driver = OpenLoopDriver(loadgen_settings(default_h=0.25), FakePipeline())
 
     status = driver.snapshot_status()
     assert status["h"] == 0.25
@@ -134,7 +150,7 @@ def test_status_reports_the_fallback_h_as_unmeasured() -> None:
 
 def test_rate_change_starts_a_new_clock_and_stop_fires_nothing_late() -> None:
     fake = FakePipeline()
-    driver = OpenLoopDriver(LoadgenSettings(), fake, rng=random.Random(2))
+    driver = OpenLoopDriver(loadgen_settings(), fake, rng=random.Random(2))
 
     async def run() -> None:
         await driver.start()
@@ -163,7 +179,7 @@ def test_rate_change_starts_a_new_clock_and_stop_fires_nothing_late() -> None:
 
 def test_calibrate_reports_h_and_429_mix() -> None:
     fake = FakePipeline()
-    settings = LoadgenSettings(
+    settings = loadgen_settings(
         calibrate_step_s=0.05,
         calibrate_start_rps=1.0,
         calibrate_factor=2.0,
@@ -182,12 +198,15 @@ def test_calibrate_reports_h_and_429_mix() -> None:
     assert body["http_429s"] == {"door": 0, "kitchen": 2, "courier": 1}
     assert body["door_first"] is False
     assert driver.h == 2.0
+    assert set(body).issuperset(
+        {"offered", "accepted", "door_429", "other_http", "transport_unknown"}
+    )
 
 
 def test_calibrate_h_is_last_flat_step_when_backlog_climbs() -> None:
     fake = FakePipeline()
     fake.backlog_end = 40
-    settings = LoadgenSettings(calibrate_step_s=0.05)
+    settings = loadgen_settings(calibrate_step_s=0.05)
     driver = OpenLoopDriver(settings, fake)
 
     async def run() -> dict[str, Any]:
@@ -205,7 +224,7 @@ def test_calibrate_h_is_last_flat_step_when_backlog_climbs() -> None:
 def test_zero_h_refuses_steady_and_rush() -> None:
     fake = FakePipeline()
     fake.backlog_end = 40
-    app = create_app(LoadgenSettings(calibrate_step_s=0.05), client=fake)
+    app = create_app(loadgen_settings(calibrate_step_s=0.05), client=fake)
 
     with TestClient(app) as client:
         calibrated = client.post(
@@ -232,7 +251,7 @@ def test_calibrate_rejects_flat_backlog_with_over_age_or_new_park() -> None:
             return body
 
     fake = UnsafePipeline()
-    driver = OpenLoopDriver(LoadgenSettings(), fake)
+    driver = OpenLoopDriver(loadgen_settings(), fake)
 
     async def run() -> dict[str, Any]:
         await driver.start()
@@ -279,7 +298,7 @@ def test_calibrate_keeps_probing_after_backlog_growth_until_downstream_429() -> 
             }
 
     fake = OverloadProbePipeline()
-    driver = OpenLoopDriver(LoadgenSettings(), fake)
+    driver = OpenLoopDriver(loadgen_settings(), fake)
 
     async def run() -> dict[str, Any]:
         await driver.start()
@@ -320,7 +339,7 @@ def test_calibrate_ignores_in_service_cook_and_ride_polls() -> None:
             }
 
     fake = CookingPipeline()
-    driver = OpenLoopDriver(LoadgenSettings(), fake)
+    driver = OpenLoopDriver(loadgen_settings(), fake)
 
     async def run() -> dict[str, Any]:
         await driver.start()
@@ -357,7 +376,7 @@ def test_calibrate_door_first_ignores_earlier_cumulative_429s() -> None:
             }
 
     fake = PriorDoorPipeline()
-    driver = OpenLoopDriver(LoadgenSettings(), fake)
+    driver = OpenLoopDriver(loadgen_settings(), fake)
 
     async def run() -> dict[str, Any]:
         await driver.start()
@@ -378,7 +397,7 @@ def test_calibrate_door_first_ignores_earlier_cumulative_429s() -> None:
 
 def test_loadgen_http_health_cohort_steady_rush_stop() -> None:
     fake = FakePipeline()
-    settings = LoadgenSettings(calibrate_step_s=0.05)
+    settings = loadgen_settings(calibrate_step_s=0.05)
     app = create_app(settings, client=fake)
     with TestClient(app) as client:
         health = client.get("/health")
@@ -432,9 +451,9 @@ class FakeCancelRace:
 def test_cancel_race_beat_uses_injected_runner() -> None:
     fake = FakePipeline()
     runner = FakeCancelRace()
-    app = create_app(LoadgenSettings(), client=fake, cancel_race=runner)
+    app = create_app(loadgen_settings(), client=fake, cancel_race=runner)
     with TestClient(app) as client:
-        missing = create_app(LoadgenSettings(), client=fake)
+        missing = create_app(loadgen_settings(), client=fake)
         with TestClient(missing) as bare:
             assert bare.post("/beat/cancel-race").status_code == 503
         response = client.post("/beat/cancel-race")
@@ -464,9 +483,9 @@ class FakeBeatPlace:
 def test_beat_place_uses_injected_runner() -> None:
     fake = FakePipeline()
     runner = FakeBeatPlace()
-    app = create_app(LoadgenSettings(), client=fake, beat_place=runner)
+    app = create_app(loadgen_settings(), client=fake, beat_place=runner)
     with TestClient(app) as client:
-        missing = create_app(LoadgenSettings(), client=fake)
+        missing = create_app(loadgen_settings(), client=fake)
         with TestClient(missing) as bare:
             assert bare.post("/beat/place", json={"item": "burrito"}).status_code == 503
         unknown = client.post("/beat/place", json={"item": "chicken_burrito"})
@@ -477,3 +496,376 @@ def test_beat_place_uses_injected_runner() -> None:
         assert body["item"] == "burrito"
         assert body["order_id"] == "22222222-2222-4222-8222-222222222222"
         assert runner.calls == [(UUID(body["cohort_id"]), "burrito")]
+
+
+class TimeoutAfterCommit:
+    """First POST is lost after the API accepted; replay must reuse the key."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.committed = 0
+        self.place_keys: list[str] = []
+        self.bodies: list[list[str]] = []
+
+    async def place(self, *, items: list[str], cohort_id: UUID, place_key: str) -> int:
+        del cohort_id
+        self.calls += 1
+        self.place_keys.append(place_key)
+        self.bodies.append(list(items))
+        if self.calls == 1:
+            self.committed += 1
+            raise httpx.ReadTimeout("lost after commit")
+        return 201
+
+    async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
+        del cohort_id
+        return {
+            "backlog": _empty_backlog(),
+            "oldest_open": {"age_s": 1.0, "stage": "placed"},
+            "http_429s": {"door": 0, "kitchen": 0, "courier": 0},
+            "currently_leased": 0,
+        }
+
+    async def aclose(self) -> None:
+        return None
+
+
+def test_place_timeout_after_commit_replays_same_key_once() -> None:
+    fake = TimeoutAfterCommit()
+    driver = OpenLoopDriver(loadgen_settings(), fake, rng=random.Random(3))
+
+    asyncio.run(driver._place_one())
+    assert fake.committed == 1
+    assert fake.calls == 2
+    assert fake.place_keys[0] == fake.place_keys[1]
+    assert fake.bodies[0] == fake.bodies[1]
+    assert len(set(fake.place_keys)) == 1
+    assert driver.placed == 1
+    assert driver.offered == 1
+    assert driver.transport_unknown == 0
+    status = driver.snapshot_status()
+    assert status["offered"] == 1
+    assert status["placed"] == 1
+    assert status["other_http"] == 0
+    assert status["transport_unknown"] == 0
+
+
+class SplitOutcomePipeline:
+    """Door 429, other HTTP, and unresolved transport each get their own bucket."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.snapshots = 0
+
+    async def place(self, *, items: list[str], cohort_id: UUID, place_key: str) -> int:
+        del items, cohort_id, place_key
+        self.calls += 1
+        if self.calls == 1:
+            return 201
+        if self.calls == 2:
+            return 429
+        if self.calls == 3:
+            return 503
+        raise httpx.ConnectError("upstream gone")
+
+    async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
+        del cohort_id
+        self.snapshots += 1
+        return {
+            "backlog": _empty_backlog(),
+            "oldest_open": {"age_s": 1.0, "stage": "placed"},
+            "http_429s": {"door": 0, "kitchen": 0, "courier": 0},
+            "currently_leased": 0,
+        }
+
+    async def aclose(self) -> None:
+        return None
+
+
+def test_status_splits_offered_accepted_door_other_http_and_transport() -> None:
+    fake = SplitOutcomePipeline()
+    driver = OpenLoopDriver(loadgen_settings(place_timeout_retries=0), fake, rng=random.Random(4))
+
+    async def run() -> None:
+        await driver._place_one()
+        await driver._place_one()
+        await driver._place_one()
+        await driver._place_one()
+
+    asyncio.run(run())
+    assert driver.offered == 4
+    assert driver.placed == 1
+    assert driver.rejected_429 == 1
+    assert driver.other_http == 1
+    assert driver.transport_unknown == 1
+    counters = driver.load_counters()
+    assert counters == {
+        "offered": 4,
+        "accepted": 1,
+        "door_429": 1,
+        "other_http": 1,
+        "transport_unknown": 1,
+    }
+
+
+class TransportDuringCalibrate(FakePipeline):
+    async def place(self, *, items: list[str], cohort_id: UUID, place_key: str) -> int:
+        self.places.append((list(items), cohort_id))
+        self.place_keys.append(place_key)
+        raise httpx.ReadTimeout("lost")
+
+    async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
+        del cohort_id
+        self.snapshots += 1
+        return {
+            "backlog": _empty_backlog(),
+            "oldest_open": {"age_s": 1.0, "stage": "placed"},
+            "http_429s": {"door": 0, "kitchen": 0, "courier": 0},
+            "currently_leased": 0,
+        }
+
+
+def test_unresolved_transport_invalidates_a_calibration_step() -> None:
+    fake = TransportDuringCalibrate()
+    driver = OpenLoopDriver(
+        loadgen_settings(place_timeout_retries=0, calibrate_stale_abort_steps=2),
+        fake,
+    )
+
+    async def run() -> dict[str, Any]:
+        await driver.start()
+        result = await driver.calibrate(step_s=0.05, start_rps=1.0, factor=2.0, max_rps=1.0)
+        await driver.aclose()
+        return result
+
+    body = asyncio.run(run())
+    assert body["h"] == 0.0
+    assert body["transport_unknown"] >= 1
+    assert body["steps"][0]["transport_clean"] is False
+    assert body["steps"][0]["flat"] is False
+    assert body["accepted"] == 0
+
+
+class DirtyOldestPipeline(FakePipeline):
+    async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
+        del cohort_id
+        self.snapshots += 1
+        return {
+            "backlog": _empty_backlog(),
+            "oldest_open": {"age_s": 130.0, "stage": "confirmed"},
+            "http_429s": {"door": 0, "kitchen": 0, "courier": 0},
+            "parked_list": [{"order_id": "leftover"}],
+            "no_progress_beyond_threshold": {"count": 1, "threshold_s": 90},
+            "currently_leased": 0,
+        }
+
+
+def test_calibrate_aborts_when_h_stays_zero() -> None:
+    fake = DirtyOldestPipeline()
+    driver = OpenLoopDriver(
+        loadgen_settings(calibrate_stale_abort_steps=2),
+        fake,
+    )
+
+    async def run() -> dict[str, Any]:
+        await driver.start()
+        result = await driver.calibrate(
+            step_s=0.05,
+            start_rps=0.5,
+            factor=2.0,
+            max_rps=8.0,
+        )
+        await driver.aclose()
+        return result
+
+    body = asyncio.run(run())
+    assert body["h"] == 0.0
+    assert body["aborted"] == "h_still_zero"
+    assert len(body["steps"]) == 2
+    assert body["diagnostic"]["parked_count"] == 1
+    assert "docker compose down -v" in body["diagnostic"]["hint"]
+
+
+class LingeringCookPipeline:
+    def __init__(self) -> None:
+        self.places = 0
+        self.snapshots = 0
+        self.cook_left = 4
+
+    async def place(self, *, items: list[str], cohort_id: UUID, place_key: str) -> int:
+        del items, cohort_id, place_key
+        self.places += 1
+        return 201
+
+    async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
+        del cohort_id
+        self.snapshots += 1
+        cook = self.cook_left
+        if self.cook_left > 0:
+            self.cook_left -= 1
+        return {
+            "backlog": {
+                "confirm": 0,
+                "poll_cook": cook,
+                "dispatch": 0,
+                "poll_ride": cook,
+            },
+            "oldest_open": {"age_s": 5.0, "stage": "being prepared"},
+            "http_429s": {"door": 0, "kitchen": 0, "courier": 0},
+            "currently_leased": 0,
+        }
+
+    async def aclose(self) -> None:
+        return None
+
+
+def test_stop_and_drain_waits_for_cook_and_ride_after_posts() -> None:
+    fake = LingeringCookPipeline()
+    driver = OpenLoopDriver(
+        loadgen_settings(drain_timeout_s=1.0, drain_poll_s=0.02),
+        fake,
+    )
+
+    async def run() -> dict[str, Any]:
+        await driver.start()
+        await driver._place_one()
+        started = time.monotonic()
+        result = await driver.stop_and_drain()
+        result["_elapsed"] = time.monotonic() - started
+        await driver.aclose()
+        return result
+
+    body = asyncio.run(run())
+    assert fake.places == 1
+    assert body["quiesced"] is True
+    assert body["timed_out"] is False
+    assert body["in_service"] == 0
+    assert fake.snapshots >= 4
+    assert body["_elapsed"] >= 0.04
+
+
+class RecoveringRushPipeline:
+    def __init__(self) -> None:
+        self.snapshots = 0
+
+    async def place(self, *, items: list[str], cohort_id: UUID, place_key: str) -> int:
+        del items, cohort_id, place_key
+        return 201
+
+    async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
+        del cohort_id
+        self.snapshots += 1
+        waiting = max(0, 8 - self.snapshots)
+        age = max(0.0, 20.0 - 3.0 * self.snapshots)
+        parked = [{"order_id": "shed"}] if self.snapshots >= 2 else []
+        return {
+            "backlog": {
+                "confirm": waiting,
+                "poll_cook": 0,
+                "dispatch": 0,
+                "poll_ride": 0,
+            },
+            "oldest_open": {"age_s": age, "stage": "placed"},
+            "http_429s": {"door": 0, "kitchen": 0, "courier": 0},
+            "parked_list": parked,
+            "currently_leased": 0,
+        }
+
+    async def aclose(self) -> None:
+        return None
+
+
+def test_observe_recovery_requires_sustained_decline_and_reports_parking() -> None:
+    fake = RecoveringRushPipeline()
+    driver = OpenLoopDriver(
+        loadgen_settings(recovery_streak=3, drain_poll_s=0.01, drain_timeout_s=1.0),
+        fake,
+    )
+
+    async def run() -> dict[str, Any]:
+        return await driver.observe_recovery(
+            baseline_backlog=0,
+            baseline_age_s=2.0,
+            peak_backlog=8,
+            peak_age_s=20.0,
+            timeout_s=1.0,
+        )
+
+    body = asyncio.run(run())
+    assert body["recovered"] is True
+    assert body["backlog_recovered"] is True
+    assert body["parked_seen"] is True
+    assert body["parked_count"] >= 1
+    assert body["waiting_backlog"] < body["peak_backlog"]
+
+
+def test_observe_drain_endpoint_returns_production_predicate() -> None:
+    fake = RecoveringRushPipeline()
+    app = create_app(
+        loadgen_settings(recovery_streak=3, drain_poll_s=0.01, drain_timeout_s=1.0),
+        client=fake,
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/observe-drain",
+            json={
+                "baseline_backlog": 0,
+                "baseline_age_s": 2.0,
+                "peak_backlog": 8,
+                "peak_age_s": 20.0,
+                "timeout_s": 1.0,
+            },
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["recovered"] is True
+    assert body["parked_seen"] is True
+    assert "parked_count" in body
+
+
+class StuckRushPipeline:
+    async def place(self, *, items: list[str], cohort_id: UUID, place_key: str) -> int:
+        del items, cohort_id, place_key
+        return 201
+
+    async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
+        del cohort_id
+        return {
+            "backlog": {
+                "confirm": 12,
+                "poll_cook": 0,
+                "dispatch": 0,
+                "poll_ride": 0,
+            },
+            "oldest_open": {"age_s": 40.0, "stage": "placed"},
+            "http_429s": {"door": 0, "kitchen": 0, "courier": 0},
+            "parked_list": [{"order_id": "parked"}],
+            "currently_leased": 0,
+        }
+
+    async def aclose(self) -> None:
+        return None
+
+
+def test_observe_drain_does_not_treat_parking_as_recovery() -> None:
+    fake = StuckRushPipeline()
+    app = create_app(
+        loadgen_settings(drain_poll_s=0.01, drain_timeout_s=0.08),
+        client=fake,
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/observe-drain",
+            json={
+                "baseline_backlog": 0,
+                "baseline_age_s": 1.0,
+                "peak_backlog": 12,
+                "peak_age_s": 40.0,
+                "timeout_s": 0.08,
+            },
+        )
+    assert response.status_code == 504, response.text
+    body = response.json()["detail"]
+    assert body["recovered"] is False
+    assert body["parked_seen"] is True
+    assert body["parked_count"] == 1

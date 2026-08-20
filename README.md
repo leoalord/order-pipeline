@@ -38,12 +38,14 @@ Two worker replicas. Health stays inside the container (8083 is not published). 
 
 ## Load
 
-The rail is the intended path. Calibrate first so rush is sized to this machine; Normal can run on the fallback H, Rush cannot.
+The rail is the intended path. **`docker compose down -v && docker compose up --wait` is required before calibration** while simulator ledger pagination stays deferred: a fat restaurant ledger serializes accepts at tens of milliseconds and an H measured on that volume is not comparable to a fresh one.
 
-1. **Calibrate** — measures H, the highest rate whose backlog stays flat.
-2. **New cohort** — isolates the demo evidence.
+Calibrate first so rush is sized to this machine; Normal can run on the fallback H, Rush cannot. Calibrate mints its own measurement cohort so leftover parked or stalled rows cannot pin `oldest_age_s` and walk the ramp to `h = 0`.
+
+1. **Calibrate** — measures H, the highest rate whose waiting backlog stays flat. Status and the calibrate payload separately report offered requests, 201 accepted, door 429, other HTTP, and transport/timeout unknowns. A step with unresolved transport errors is not sustainable. If H is still 0 after a few steps the ramp aborts with a diagnostic instead of walking to `calibrate_max_rps`.
+2. **New cohort** — isolates the demo walk from calibration traffic.
 3. **01 Normal** — steady `0.4×H`. Follow one ticket through every stage.
-4. **02 Rush** — 60s at `1.5×H`, then drain back to `0.4×H`.
+4. **02 Rush** — 60s at `1.5×H`, then drain back to `0.4×H`. Drain means waiting backlog and oldest-age improve (sustained decline or back to the pre-rush baseline). Parking is shedding and is reported separately; it is not recovery. `POST /stop` waits for in-flight POSTs **and** cook/ride work to quiesce.
 
 Same endpoints from the host:
 
@@ -52,14 +54,15 @@ curl -sS -X POST http://localhost:8090/calibrate
 curl -sS -X POST http://localhost:8090/cohort/new
 curl -sS -X POST http://localhost:8090/scenario/steady
 curl -sS -X POST http://localhost:8090/scenario/rush
+curl -sS -X POST http://localhost:8090/observe-drain
 curl -sS -X POST http://localhost:8090/stop
 ```
 
-Loadgen is open-loop: a door `429` is a counted reject, not a silent drop and not a generator slowdown.
+Loadgen is open-loop: a door `429` is a counted reject, not a silent drop and not a generator slowdown. An ambiguous place-order timeout retries the same `Idempotency-Key` and body.
 
 ## Failures
 
-Sims run an always-on 3% 5xx / 2% drop mix. The rail's later cards are the on-purpose breaks.
+Sims run an always-on 3% 5xx / 2% drop mix. Perform the rail's five cards in order — **01 Normal, 02 Rush, 03 Outage, 04 Worker crash, 05 Courier failure** — even if a longer runbook folds park/redrive into scenario 3.
 
 **03 Outage.** **1 · Doom confirms** tags three orders that must fail confirm. **2 · Blackout** takes the restaurant down for 60s. In-flight work holds; the Restaurant chip reads Fault active. **Recover restaurant** clears it. Doomed orders fail at `accepted_at + 120s`; untagged ones resume.
 
@@ -94,7 +97,7 @@ Cancelling an order that the restaurant already accepted is partial success, and
 - One Python package (`order_pipeline`), one Python image. Restaurant, courier, worker, and loadgen are compose `command:`s. The dashboard is a separate Vite image.
 - The API validates, persists, and returns. Place and cancel never call the sims. `GET /snapshot` is the one additive read the board polls (it does read both sim ledgers for duplicate-effects).
 - Two FastAPI sims share one core (accept, poll, Stripe key cache, SQLite ledger, `/admin/faults`). Kitchen is 20 pans; courier is 8 bikes. Each 429s when the quoted wait is more than 3× that ticket's quiet time.
-- Two workers on a plugin chassis (confirm, poll_cook, void_ticket, dispatch, poll_ride). Each cycle is claim → HTTP → finalize; there is no DB transaction across the outbound call. Claim and finalize run off the loop on *separate* thread pools, and the DB pool is sized to `WORKER_FINALIZE_WORKERS` plus headroom, so a stuck commit can neither starve the claim loop nor exhaust the connections `/health` needs.
+- Two workers on a plugin chassis (confirm, poll_cook, void_ticket, dispatch, poll_ride). Each cycle is claim → HTTP → finalize; there is no DB transaction across the outbound call. Claim and finalize run off the loop on *separate* thread pools, and the DB pool is sized to `WORKER_FINALIZE_WORKERS` plus headroom, so a stuck commit can neither starve the claim loop nor exhaust the connections `/health` needs. The first cook poll is scheduled at `service_started_at` (when the pan is due) so the 30-poll budget is not burned while the ticket sits on the rail; `estimated_ready_at` is the ready hint, not the first-poll time. Items already due wake together; the post-recovery stampede brake is dep-cap admission (`eligible_types`), not jitter on the due pile. Jitter applies to failed RETRY writes.
 - Intake is a client `Idempotency-Key` plus a body fingerprint. Confirm/dispatch reuse a stored `(order_id, work)` key. Polls reuse the accept/dispatch ticket key, never a per-poll key. That stored key is the double-effect guarantee: a survivor retries the same key and the sim replays. `WORKER_LEASE_S > WORKER_SIM_TIMEOUT_S` is defence in depth so a live call is not stolen under shipped defaults — not because “a lease covers exactly one outbound call.”
 
 ## Decisions
@@ -115,4 +118,10 @@ Cancelling an order that the restaurant already accepted is partial success, and
 make check   # ruff + mypy + dashboard tsc + pytest
 ```
 
-Happy-path tests turn the mix off, then restore it.
+`make check` expects the live Compose stack: pytest talks to the published ports (API 8000, sims 8081/8082, loadgen 8090, dashboard 5173). Happy-path tests turn the mix off, then restore it.
+
+Slow coverage (`@pytest.mark.slow`) is the long calibrate / rush / outage path on that stack:
+
+- `tests/test_loadgen_compose.py::test_calibrate_reports_h_and_429_mix`
+- `tests/test_dinner_rush_compose.py::test_scenario_0_steady_walk_and_scenario_1_rush`
+- `tests/test_doom_confirm_compose.py` (outage fixture)

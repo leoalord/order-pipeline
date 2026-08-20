@@ -154,7 +154,7 @@ def test_scenario_3_kill_resume_then_park_clear_redrive() -> None:
     park_cohort = uuid.uuid4()
     killed = False
     try:
-        stopped = _http("POST", f"{LOADGEN_URL}/stop")
+        stopped = _http("POST", f"{LOADGEN_URL}/stop", timeout=240.0)
         assert stopped.status_code == 200, stopped.text
         mix_off()
 

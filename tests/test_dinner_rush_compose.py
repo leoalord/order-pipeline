@@ -15,7 +15,12 @@ import httpx
 import pytest
 
 from order_pipeline.api.snapshot import STAGE_NAMES
-from order_pipeline.loadgen.driver import backlog_total, oldest_age_s, step_is_flat
+from order_pipeline.loadgen.driver import (
+    backlog_total,
+    oldest_age_s,
+    step_is_flat,
+    waiting_backlog,
+)
 from tests.sim_admin import CSIM_URL, RSIM_URL, post_sim_faults
 
 API_URL = "http://localhost:8000"
@@ -155,7 +160,7 @@ def test_faults_3_2_before_calibrate_and_pane_binds_429s() -> None:
 def test_scenario_0_steady_walk_and_scenario_1_rush() -> None:
     """Scenario 0 Pass then scenario 1 Pass. Mix stays on. Stop in finally."""
     _mix_on()
-    _http("POST", f"{LOADGEN_URL}/stop", timeout=15.0)
+    _http("POST", f"{LOADGEN_URL}/stop", timeout=240.0)
     minted = _http("POST", f"{LOADGEN_URL}/cohort/new")
     assert minted.status_code == 200, minted.text
     calibrated = _http(
@@ -232,6 +237,7 @@ def test_scenario_0_steady_walk_and_scenario_1_rush() -> None:
 
         peak_backlog = base_backlog
         peak_age = base_age
+        peak_waiting = waiting_backlog(baseline)
         saw_rise_backlog = False
         saw_rise_age = False
         accepted_floor = baseline["conservation"]["accepted"]
@@ -247,6 +253,7 @@ def test_scenario_0_steady_walk_and_scenario_1_rush() -> None:
             age = oldest_age_s(last_rush) or 0.0
             peak_backlog = max(peak_backlog, depth)
             peak_age = max(peak_age, age)
+            peak_waiting = max(peak_waiting, waiting_backlog(last_rush))
             if depth > base_backlog + 2:
                 saw_rise_backlog = True
             if age > base_age + 1.0:
@@ -278,6 +285,7 @@ def test_scenario_0_steady_walk_and_scenario_1_rush() -> None:
                 age = oldest_age_s(last_rush) or 0.0
                 peak_backlog = max(peak_backlog, depth)
                 peak_age = max(peak_age, age)
+                peak_waiting = max(peak_waiting, waiting_backlog(last_rush))
                 if depth > base_backlog + 2:
                     saw_rise_backlog = True
                 if age > base_age + 1.0:
@@ -291,45 +299,36 @@ def test_scenario_0_steady_walk_and_scenario_1_rush() -> None:
         )
         assert saw_rise_age, f"oldest-age never rose; base={base_age} peak={peak_age} h={h}"
 
-        drain_deadline = time.monotonic() + 180.0
-        saw_fall_backlog = False
-        saw_fall_age = False
-        parked_seen = False
-        while time.monotonic() < drain_deadline:
-            last_rush = _dashboard_snapshot(cohort_id=cohort_id)
-            _assert_conservation(last_rush)
-            accepted = last_rush["conservation"]["accepted"]
-            assert accepted >= accepted_floor
-            accepted_floor = accepted
-            depth = backlog_total(last_rush)
-            age = oldest_age_s(last_rush) or 0.0
-            parked = last_rush["parked_list"]
-            assert isinstance(parked, list)
-            if parked:
-                parked_seen = True
-            if depth < peak_backlog:
-                saw_fall_backlog = True
-            if age < peak_age:
-                saw_fall_age = True
-            if saw_fall_backlog and (saw_fall_age or parked_seen):
-                break
-            time.sleep(POLL_EVERY_S)
-
-        assert saw_fall_backlog, (
-            f"backlog never fell; peak={peak_backlog} last={backlog_total(last_rush)}"
+        drain = _http(
+            "POST",
+            f"{LOADGEN_URL}/observe-drain",
+            json={
+                "baseline_backlog": waiting_backlog(baseline),
+                "baseline_age_s": base_age,
+                "peak_backlog": peak_waiting,
+                "peak_age_s": peak_age,
+                "timeout_s": 180.0,
+            },
+            timeout=190.0,
         )
-        # Parked work stays in-flight, so oldest-age can keep climbing. That is
-        # shedding — do not fail the rush because parks appeared.
-        assert saw_fall_age or parked_seen, (
-            f"oldest-age never fell; peak={peak_age} last={oldest_age_s(last_rush)} "
-            f"parked={last_rush['parked_list']}"
-        )
+        assert drain.status_code == 200, drain.text
+        drain_body = drain.json()
+        assert drain_body["recovered"] is True, drain_body
+        assert drain_body["backlog_recovered"] is True, drain_body
+        assert drain_body["age_recovered"] or drain_body["waiting_recovered"], drain_body
+        assert "parked_count" in drain_body
+        # Parking is shedding, reported separately — not a substitute for drain.
+        last_rush = _dashboard_snapshot(cohort_id=cohort_id)
+        _assert_conservation(last_rush)
+        accepted = last_rush["conservation"]["accepted"]
+        assert accepted >= accepted_floor
         assert last_rush["duplicate_effects"] == 0
         assert last_rush["invalid_transitions"] == 0
         assert last_rush["conservation"]["residual"] == 0
         parked = last_rush["parked_list"]
         assert isinstance(parked, list)
+        assert isinstance(drain_body["parked_count"], int)
         for row in parked:
             assert "owner" in row and "reason" in row and "next_action" in row
     finally:
-        _http("POST", f"{LOADGEN_URL}/stop", timeout=15.0)
+        _http("POST", f"{LOADGEN_URL}/stop", timeout=240.0)

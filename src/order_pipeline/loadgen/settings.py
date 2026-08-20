@@ -34,6 +34,15 @@ class LoadgenSettings(BaseSettings):
     two_item_pct: float = 20.0
     place_timeout_s: float = 5.0
     snapshot_timeout_s: float = 5.0
+    # Ambiguous place-order timeouts replay the same key once.
+    place_timeout_retries: int = 1
+    # Dirty leftover work pins oldest-age; abort rather than walking ~13 steps.
+    calibrate_stale_abort_steps: int = 3
+    drain_timeout_s: float = 180.0
+    drain_poll_s: float = 0.25
+    recovery_streak: int = 3
+    recovery_backlog_slack: int = 2
+    recovery_age_slack_s: float = 2.0
 
     @model_validator(mode="after")
     def enforce_design_constraints(self) -> Self:
@@ -55,4 +64,11 @@ class LoadgenSettings(BaseSettings):
         assert self.one_item_pct + self.two_item_pct < 100, (
             "cart mix must leave room for some 3-item carts"
         )
+        assert self.place_timeout_retries >= 0, "place_timeout_retries must be >= 0"
+        assert self.calibrate_stale_abort_steps >= 1, "calibrate_stale_abort_steps must be >= 1"
+        assert self.drain_timeout_s > 0, "drain_timeout_s must be > 0"
+        assert self.drain_poll_s > 0, "drain_poll_s must be > 0"
+        assert self.recovery_streak >= 1, "recovery_streak must be >= 1"
+        assert self.recovery_backlog_slack >= 0, "recovery_backlog_slack must be >= 0"
+        assert self.recovery_age_slack_s >= 0, "recovery_age_slack_s must be >= 0"
         return self

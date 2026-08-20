@@ -165,8 +165,21 @@ def create_app(
 
     @app.post("/stop")
     async def stop() -> dict[str, Any]:
-        await driver.stop_and_drain()
-        return driver.snapshot_status()
+        return await driver.stop_and_drain()
+
+    @app.post("/observe-drain")
+    async def observe_drain(request: Request) -> dict[str, Any]:
+        body = await _read_json_object(request)
+        result = await driver.observe_recovery(
+            baseline_backlog=_optional_int(body.get("baseline_backlog")),
+            baseline_age_s=_optional_float(body.get("baseline_age_s")),
+            peak_backlog=_optional_int(body.get("peak_backlog")),
+            peak_age_s=_optional_float(body.get("peak_age_s")),
+            timeout_s=_optional_float(body.get("timeout_s")),
+        )
+        if not result["recovered"]:
+            raise HTTPException(status_code=504, detail=result)
+        return result
 
     @app.post("/cohort/new")
     async def new_cohort() -> dict[str, str]:
@@ -227,3 +240,11 @@ def _optional_float(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise HTTPException(status_code=400, detail="expected a number")
     return float(value)
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise HTTPException(status_code=400, detail="expected an integer")
+    return int(value)

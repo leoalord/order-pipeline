@@ -351,8 +351,8 @@ export function PresenterRail({
           </strong>
           <small>
             {calibrated
-              ? "Recalibrate after changing the worker or dependency topology."
-              : "Normal runs on the fallback. Rush needs a measured H. Calibrate finds the fastest rate that keeps up before kitchen, courier, or the door say busy."}
+              ? "Recalibrate after changing the worker or dependency topology. Calibrate mints its own cohort so leftover parked or stalled rows cannot pin oldest-age."
+              : "Fresh volume first (`docker compose down -v`). Calibrate mints a measurement cohort and finds the fastest rate that keeps up before kitchen, courier, or the door say busy. Normal runs on the fallback. Rush needs a measured H."}
           </small>
         </div>
         <button
