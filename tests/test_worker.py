@@ -948,6 +948,85 @@ async def _never_called(_item: ClaimedWork) -> HandlerResult:
     raise AssertionError("no work should be claimed in this test")
 
 
+def _stub_claim(work_type: str = "dispatch") -> ClaimedWork:
+    return ClaimedWork(
+        work_item_id=uuid.uuid4(),
+        order_id=uuid.uuid4(),
+        work_type=work_type,
+        idempotency_key="stub",
+        attempt_id=uuid.uuid4(),
+        lease_owner="starvation",
+        attempt_count=1,
+        payload=None,
+        order_state="ready",
+        order_version=1,
+        accepted_at=datetime.now(UTC),
+    )
+
+
+def test_stuck_finalizes_do_not_starve_the_claim_loop(db_engine: Engine) -> None:
+    """Finalize and claim must not share one thread pool.
+
+    On the shared default executor, enough stuck commits fill every thread and
+    run() blocks at its own `await` -- the replica is alive, claims nothing, and
+    the claim-retry backoff is unreachable because control never returns to it.
+    """
+    settings = _settings()
+    release = threading.Event()
+    claims = {"n": 0}
+    # More stuck finalizes than the *default* executor has threads, which is what
+    # sharing it with claim used to mean.
+    saturating = min(32, (os.cpu_count() or 1) + 4) + 4
+
+    async def handler(_item: ClaimedWork) -> HandlerResult:
+        return HandlerResult(outcome="ok")
+
+    worker = Worker(
+        settings,
+        db_engine,
+        handlers={"dispatch": cast(WorkHandler, handler)},
+        worker_id="starvation",
+        idle_s=0.01,
+    )
+
+    def blocked_finalize(_claimed: ClaimedWork, _result: HandlerResult) -> None:
+        release.wait(timeout=10.0)
+
+    def counting_claim(
+        *,
+        work_item_id: uuid.UUID | None = None,
+        work_types: tuple[str, ...] | None = None,
+    ) -> ClaimedWork | None:
+        claims["n"] += 1
+        return None  # nothing to claim; the point is that the loop keeps turning
+
+    worker.finalize = blocked_finalize  # type: ignore[assignment]
+    worker.claim = counting_claim  # type: ignore[method-assign]
+
+    async def _run() -> None:
+        stuck = [asyncio.create_task(worker.process(_stub_claim())) for _ in range(saturating)]
+        await asyncio.sleep(0.2)
+        assert not any(task.done() for task in stuck), "finalize did not actually block"
+        before = claims["n"]
+        loop_task = asyncio.create_task(worker.run())
+        try:
+            await asyncio.sleep(0.5)
+            assert claims["n"] > before, (
+                f"claim loop starved by {saturating} stuck finalizes (claims stuck at {before})"
+            )
+        finally:
+            loop_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await loop_task
+            release.set()
+            await asyncio.gather(*stuck)
+
+    try:
+        asyncio.run(_run())
+    finally:
+        release.set()
+
+
 def test_run_survives_transient_claim_error_then_processes(
     db_engine: Engine,
     session_factory: sessionmaker[Session],
