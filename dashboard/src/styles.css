@@ -819,6 +819,10 @@ button:disabled {
   border-left: 2px solid var(--red);
 }
 
+.evidence-metric.unknown {
+  border-left: 2px solid var(--muted-strong);
+}
+
 .health-group {
   padding: 8px;
   display: grid;

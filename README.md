@@ -78,7 +78,7 @@ The abandoned attempt stays `outcome IS NULL`. A survivor retries the same store
 
 **05 Courier failure.** **Blackout courier · 30s** exhausts dispatch (budget 5). The order stays `ready`; the work item parks. **Recover courier**, then **Redrive** on that parked row — same work-item id and `(order_id, dispatch)` key, one courier-ledger effect. The dashboard Redrive button stays disabled while the fault is armed (`redriveBlocker` on Watch). `POST /work-items/{id}/redrive` still accepts a mid-fault redrive — the item becomes pending again and parks if the fault is still on; the crash-beat test depends on that.
 
-Health while this runs: the three chips (Restaurant · Workers · Delivery), the correctness drawer (conservation, duplicate attempts vs effects), and `GET /snapshot`.
+Health while this runs: the three chips (Restaurant · Workers · Delivery), the correctness drawer, and `GET /snapshot`. The drawer leads with state vs last applied event, accepted orders with no work item, simulator-ledger duplicate effects (unavailable = unknown, never a silent pass), and parked / no-progress. Conservation residual is a partition of one `orders` SELECT (`in_flight` = not terminal); it cannot detect a lost insert. `GET /snapshot` reads those Postgres rows in one repeatable-read transaction.
 
 ## Cancel and the kitchen
 

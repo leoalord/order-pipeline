@@ -21,6 +21,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "mypy>=1.13",
+    "playwright>=1.49",
     "pytest>=8.3",
     "ruff>=0.8",
 ]

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from order_pipeline.api.schemas import (
@@ -161,6 +163,19 @@ def fetch_ledger_counts(base_url: str, *, timeout_s: float = 2.0) -> tuple[dict[
     return counts, True
 
 
+@contextmanager
+def snapshot_read_session(engine: Engine) -> Iterator[Session]:
+    """One read-only REPEATABLE READ transaction for every Postgres snapshot query.
+
+    Default READ COMMITTED lets a worker commit between the orders SELECT and
+    the events SELECT, which flashes a false state_vs_last_order_events_mismatch.
+    """
+    connectable = engine.execution_options(isolation_level="REPEATABLE READ")
+    with Session(connectable, expire_on_commit=False) as session:
+        session.execute(text("SET TRANSACTION READ ONLY"))
+        yield session
+
+
 def _aware(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
@@ -243,9 +258,12 @@ def build_snapshot(
     worker_dep_cap_rsim: int = 8,
     worker_dep_cap_csim: int = 8,
     worker_task_capacity: int = 24,
+    after_orders: Callable[[], None] | None = None,
 ) -> SnapshotResponse:
     """Assemble the snapshot from Postgres + already-fetched sim ledgers. No HTTP here."""
     orders = list(session.scalars(select(Order).where(Order.cohort_id == cohort_id)))
+    if after_orders is not None:
+        after_orders()
     cohort_order_ids = {order.id for order in orders}
 
     events: list[OrderEvent] = []
@@ -279,6 +297,9 @@ def build_snapshot(
 
     accepted = len(orders)
     parked_order_ids = {item.order_id for item in work_items if item.status == "parked"}
+    # Funnel partition of this one `orders` SELECT: in_flight = not terminal, so
+    # residual is 0 unless parked work sits on a terminal row (parked_outside).
+    # It cannot detect a lost insert or a double count.
     in_flight_ids = {order.id for order in orders if order.state not in TERMINAL_STATES}
     in_flight = len(in_flight_ids)
     parked_outside = len(parked_order_ids - in_flight_ids)

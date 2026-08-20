@@ -308,6 +308,27 @@ def test_vite_proxy_reserves_loadgen_rsim_csim() -> None:
     assert "VITE_LOADGEN" not in config
 
 
+def test_correctness_drawer_uses_three_state_tones_and_honest_labels() -> None:
+    """Null duplicate_effects is unknown; residual is a partition, not lost-order proof."""
+    home = (DASHBOARD / "src" / "HomePage.tsx").read_text()
+    css = (DASHBOARD / "src" / "styles.css").read_text()
+    assert "function metricTone" in home
+    assert 'if (value === null || value === undefined) return "unknown"' in home
+    assert 'tone={snapshot?.duplicate_effects === 0 ? "healthy" : "fault"}' not in home
+    assert "State vs last applied event" in home
+    assert "accepted orders with no work item" in home
+    assert "Simulator-ledger duplicate effects" in home
+    assert "Parked / no-progress" in home
+    assert "Cannot detect a lost insert" in home
+    assert "ledgers unavailable — unknown, not a pass" in home
+    assert "tone={metricTone(snapshot?.duplicate_effects)}" in home
+    assert "tone={metricTone(snapshot?.invalid_transitions)}" in home
+    assert "tone={metricTone(snapshot?.orphaned_tickets)}" in home
+    assert "tone={metricTone(proof?.residual)}" in home
+    assert ".evidence-metric.unknown" in css
+    assert "Funnel partition" in home
+
+
 def test_makefile_wires_tsc_into_check() -> None:
     makefile = (REPO_ROOT / "Makefile").read_text()
     assert "tsc" in makefile

@@ -17,7 +17,11 @@ from order_pipeline.api.schemas import (
     SnapshotResponse,
 )
 from order_pipeline.api.settings import APISettings
-from order_pipeline.api.snapshot import build_snapshot, fetch_ledger_counts
+from order_pipeline.api.snapshot import (
+    build_snapshot,
+    fetch_ledger_counts,
+    snapshot_read_session,
+)
 from order_pipeline.cancel import CancelOutcome, OrderNotFound, cancel_order
 from order_pipeline.intake import (
     DEFAULT_COHORT_ID,
@@ -150,7 +154,7 @@ def get_snapshot(
     now = datetime.now(UTC)
     restaurant_counts, restaurant_ok = fetch_ledger_counts(settings.restaurant_admin_url)
     courier_counts, courier_ok = fetch_ledger_counts(settings.courier_admin_url)
-    with SessionLocal() as session:
+    with snapshot_read_session(engine) as session:
         return build_snapshot(
             session,
             cohort_id=cohort,

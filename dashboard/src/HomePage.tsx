@@ -39,6 +39,13 @@ type DetailPanel =
   | { kind: "system"; system: "worker" };
 
 type HealthTone = "healthy" | "pressure" | "fault";
+type MetricTone = HealthTone | "neutral" | "unknown";
+
+/** Three-state drawer tone: null/missing is unknown, never silently green or red. */
+function metricTone(value: number | null | undefined): MetricTone {
+  if (value === null || value === undefined) return "unknown";
+  return value === 0 ? "healthy" : "fault";
+}
 
 function simFaultActive(status: SimFaultStatus | undefined): boolean {
   return Boolean(
@@ -293,10 +300,11 @@ function Metric({
   label: string;
   value: string;
   detail: string;
-  tone?: HealthTone | "neutral";
+  tone?: MetricTone;
 }) {
+  const resolved = tone ?? "neutral";
   return (
-    <div className={`evidence-metric ${tone ?? "neutral"}`}>
+    <div className={`evidence-metric ${resolved}`} data-metric={label} data-tone={resolved}>
       <span>{label}</span>
       <strong>{value}</strong>
       <small>{detail}</small>
@@ -998,7 +1006,7 @@ export function HomePage() {
                     : `${conservation?.accepted ?? 0} orders reconciled`}
               </strong>
               <b>
-                Residual {fmt(conservation?.residual)} · duplicate effects{" "}
+                Funnel partition {fmt(conservation?.residual)} · duplicate effects{" "}
                 {snapshot?.duplicate_effects === null
                   ? "unavailable"
                   : fmt(snapshot?.duplicate_effects)}
@@ -1416,6 +1424,10 @@ function ZoneDetails({
 
 function CorrectnessDetails({ snapshot }: { snapshot: Snapshot | null }) {
   const proof = snapshot?.conservation;
+  const parked = snapshot?.parked_list ?? [];
+  const stalled = snapshot?.no_progress_beyond_threshold.count;
+  const parkedOrStalled =
+    snapshot == null ? null : parked.length + (stalled ?? 0);
   return (
     <div className="drawer-content">
       <section className="proof-equation">
@@ -1428,17 +1440,78 @@ function CorrectnessDetails({ snapshot }: { snapshot: Snapshot | null }) {
           {fmt(proof?.in_flight)}
         </strong>
       </section>
+      <p className="explain-note">
+        That equation partitions one <code>orders</code> SELECT
+        (<code>in_flight</code> = not terminal). Residual cannot detect a lost
+        insert.
+      </p>
       <div className="invariant-list">
-        <Metric label="Conservation residual" value={fmt(proof?.residual)} detail="must remain zero" tone={(proof?.residual ?? 0) === 0 ? "healthy" : "fault"} />
-        <Metric label="Duplicate effects" value={fmt(snapshot?.duplicate_effects)} detail={`${fmt(snapshot?.duplicate_attempts)} retry attempts are allowed`} tone={snapshot?.duplicate_effects === 0 ? "healthy" : "fault"} />
-        <Metric label="Event mismatches" value={fmt(snapshot?.state_vs_last_order_events_mismatches)} detail="state vs last applied event" tone={(snapshot?.state_vs_last_order_events_mismatches ?? 0) === 0 ? "healthy" : "fault"} />
-        <Metric label="Invalid transitions" value={fmt(snapshot?.invalid_transitions)} detail="lifecycle guard" tone={(snapshot?.invalid_transitions ?? 0) === 0 ? "healthy" : "fault"} />
-        <Metric label="Orphaned tickets" value={fmt(snapshot?.orphaned_tickets)} detail="downstream effects without live work" tone={(snapshot?.orphaned_tickets ?? 0) === 0 ? "healthy" : "fault"} />
-        <Metric label="Startup scan" value={fmt(snapshot?.startup_scan)} detail="orders missing work" tone={(snapshot?.startup_scan ?? 0) === 0 ? "healthy" : "fault"} />
+        <Metric
+          label="State vs last applied event"
+          value={fmt(snapshot?.state_vs_last_order_events_mismatches)}
+          detail="orders.state vs last applied order_events row"
+          tone={metricTone(snapshot?.state_vs_last_order_events_mismatches)}
+        />
+        <Metric
+          label="accepted orders with no work item"
+          value={fmt(snapshot?.startup_scan)}
+          detail="startup_scan — the lost-insert detector"
+          tone={metricTone(snapshot?.startup_scan)}
+        />
+        <Metric
+          label="Simulator-ledger duplicate effects"
+          value={fmt(snapshot?.duplicate_effects)}
+          detail={
+            snapshot?.duplicate_effects === null
+              ? "ledgers unavailable — unknown, not a pass"
+              : `${fmt(snapshot?.duplicate_attempts)} retry attempts are allowed`
+          }
+          tone={metricTone(snapshot?.duplicate_effects)}
+        />
+        <Metric
+          label="Parked / no-progress"
+          value={`${fmt(snapshot == null ? null : parked.length)} / ${fmt(stalled)}`}
+          detail="parked work items · orders with no progress beyond threshold"
+          tone={metricTone(parkedOrStalled)}
+        />
+        <Metric
+          label="Conservation residual"
+          value={fmt(proof?.residual)}
+          detail="Partition of one orders SELECT (in_flight = not terminal). Cannot detect a lost insert."
+          tone={metricTone(proof?.residual)}
+        />
+        <Metric
+          label="Invalid transitions"
+          value={fmt(snapshot?.invalid_transitions)}
+          detail="lifecycle guard"
+          tone={metricTone(snapshot?.invalid_transitions)}
+        />
+        <Metric
+          label="Orphaned tickets"
+          value={fmt(snapshot?.orphaned_tickets)}
+          detail="downstream effects without live work"
+          tone={metricTone(snapshot?.orphaned_tickets)}
+        />
       </div>
+      <section className="drawer-section">
+        <div className="drawer-section-heading">
+          <h3>Parked / no-progress list</h3>
+          <span>Visibility, not a lifecycle stage</span>
+        </div>
+        <div className="row-list">
+          {parked.map((row) => (
+            <article key={row.id}>
+              <strong>{displayCode(row.order_id)} · {row.work_type}</strong>
+              <span>{row.owner ?? "unowned"} · {row.reason ?? "budget exhausted"}</span>
+              <small>{row.next_action ?? "Redrive after recovery"}</small>
+            </article>
+          ))}
+          {parked.length === 0 ? <p className="empty-message">No parked work.</p> : null}
+        </div>
+      </section>
       <p className="explain-note">
         Retries may create more attempts. Stable idempotency keys keep external
-        restaurant and courier effects at one.
+        restaurant and courier effects at one. Unavailable ledgers stay unknown.
       </p>
     </div>
   );
