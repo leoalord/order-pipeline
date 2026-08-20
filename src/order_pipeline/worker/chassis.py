@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import os
 import random
 import socket
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.orm import Session, sessionmaker
 
 from order_pipeline.worker.backoff import full_jitter_delay_s
@@ -26,7 +29,9 @@ from order_pipeline.worker.plugin import ClaimedWork, HandlerResult, WorkHandler
 from order_pipeline.worker.settings import WorkerSettings
 from order_pipeline.worker.stop_rules import CONFIRM_WORK_TYPES, confirm_deadline_exceeded
 
-_TRANSIENT_CLAIM_ERRORS = (OperationalError, InterfaceError)
+# Pool checkout timeout is a SQLAlchemyError, not an OperationalError: a saturated pool
+# must back off like any other transient claim failure, never exit the loop.
+_TRANSIENT_CLAIM_ERRORS = (OperationalError, InterfaceError, PoolTimeoutError)
 
 
 class Worker:
@@ -55,6 +60,16 @@ class Worker:
         self.counters = counters or WorkerCounters()
         self._sessions: sessionmaker[Session] = sessionmaker(bind=engine, expire_on_commit=False)
         self._tasks: set[asyncio.Task[None]] = set()
+        # Separate pools: finalize must never starve claim. Sharing the default
+        # executor lets stuck commits fill every thread, wedging run() at its own
+        # await so the backoff below can never fire.
+        self._claim_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="claim")
+        self._finalize_pool = ThreadPoolExecutor(
+            max_workers=settings.finalize_workers, thread_name_prefix="finalize"
+        )
+
+    async def _in_pool[T](self, pool: ThreadPoolExecutor, fn: Callable[[], T]) -> T:
+        return await asyncio.get_running_loop().run_in_executor(pool, fn)
 
     def register(self, work_type: str, handler: WorkHandler) -> None:
         self.handlers[work_type] = handler
@@ -93,12 +108,12 @@ class Worker:
         if claimed.work_type in CONFIRM_WORK_TYPES and confirm_deadline_exceeded(
             claimed.accepted_at, now, self.settings.confirm_deadline_s
         ):
-            await asyncio.to_thread(self.finalize, claimed, HandlerResult(outcome="unknown"))
+            await self._finalize_off_loop(claimed, HandlerResult(outcome="unknown"))
             return
 
         handler = self.handlers.get(claimed.work_type)
         if handler is None:
-            await asyncio.to_thread(self.finalize, claimed, HandlerResult(outcome="unknown"))
+            await self._finalize_off_loop(claimed, HandlerResult(outcome="unknown"))
             return
 
         try:
@@ -106,7 +121,10 @@ class Worker:
         except Exception as exc:
             result = HandlerResult(outcome=classify_exception(exc))
 
-        await asyncio.to_thread(self.finalize, claimed, result)
+        await self._finalize_off_loop(claimed, result)
+
+    async def _finalize_off_loop(self, claimed: ClaimedWork, result: HandlerResult) -> None:
+        await self._in_pool(self._finalize_pool, functools.partial(self.finalize, claimed, result))
 
     async def run(self) -> None:
         in_flight = asyncio.Semaphore(self.settings.task_capacity)
@@ -124,7 +142,9 @@ class Worker:
                 await asyncio.sleep(self.idle_s)
                 continue
             try:
-                claimed = await asyncio.to_thread(self.claim, work_types=eligible)
+                claimed = await self._in_pool(
+                    self._claim_pool, functools.partial(self.claim, work_types=eligible)
+                )
             except _TRANSIENT_CLAIM_ERRORS as exc:
                 in_flight.release()
                 claim_failures += 1

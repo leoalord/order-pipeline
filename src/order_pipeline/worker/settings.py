@@ -6,6 +6,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 DEFAULT_DEP_CAP_RSIM = 8
 DEFAULT_DEP_CAP_CSIM = 8
 DEFAULT_TASK_CAPACITY = 24
+# Off-loop finalize threads. Each holds a DB connection, so this is what the
+# worker pool is sized against -- not task_capacity.
+DEFAULT_FINALIZE_WORKERS = 8
 DEFAULT_CONFIRM_DEADLINE_S = 120.0
 
 
@@ -28,6 +31,7 @@ class WorkerSettings(BaseSettings):
     dep_cap_rsim: int = DEFAULT_DEP_CAP_RSIM
     dep_cap_csim: int = DEFAULT_DEP_CAP_CSIM
     task_capacity: int = DEFAULT_TASK_CAPACITY
+    finalize_workers: int = DEFAULT_FINALIZE_WORKERS
     poll_interval_s: float = 3.0
     poll_budget: int = 30
     void_retries: int = 3
@@ -42,4 +46,5 @@ class WorkerSettings(BaseSettings):
         assert self.task_capacity > self.dep_cap_rsim + self.dep_cap_csim, (
             "one slow sim must never occupy every slot"
         )
+        assert self.finalize_workers >= 1, "finalize_workers must be >= 1"
         return self

@@ -16,7 +16,7 @@ from typing import cast
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import create_engine, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
@@ -874,13 +874,78 @@ def _operational_error(message: str) -> OperationalError:
 
 
 def test_worker_engine_validates_stale_pooled_connections() -> None:
-    from order_pipeline.worker.__main__ import create_worker_engine
+    """Pre-ping, and a pool big enough for every thread that can hold a connection."""
+    from order_pipeline.worker.__main__ import WORKER_DB_POOL_HEADROOM, create_worker_engine
 
-    engine = create_worker_engine(TEST_DATABASE_URL)
+    settings = _settings()
+    engine = create_worker_engine(settings)
     try:
         assert getattr(engine.pool, "_pre_ping", False) is True
+        # Off-loop finalize made concurrent checkouts possible; the default
+        # 5 + 10 pool is smaller than the threads that can demand one.
+        assert engine.pool.size() == settings.finalize_workers + WORKER_DB_POOL_HEADROOM
+        assert getattr(engine.pool, "_max_overflow", None) == 0
     finally:
         engine.dispose()
+
+
+def test_run_survives_pool_exhaustion(caplog: pytest.LogCaptureFixture) -> None:
+    """A saturated pool raises sqlalchemy.exc.TimeoutError from claim, not OperationalError.
+
+    Before the transient tuple covered it, this exited run() -- and under
+    restart: "no" that is the replica gone for the rest of the demo.
+    """
+    engine = create_engine(
+        TEST_DATABASE_URL,
+        pool_pre_ping=True,
+        pool_size=1,
+        max_overflow=0,
+        pool_timeout=0.25,
+    )
+    worker = Worker(
+        _settings(),
+        engine,
+        # A synthetic type so this never competes for real rows with a running stack:
+        # claim still has to reach the pool, and finds nothing once it gets there.
+        handlers={"__never_claimed__": cast(WorkHandler, _never_called)},
+        worker_id="pool-exhausted",
+        idle_s=0.01,
+        rng=random.Random(0),
+    )
+    caplog.set_level(logging.WARNING, logger="order_pipeline.worker")
+
+    def _retries() -> int:
+        return sum(record.message.startswith("claim_retry") for record in caplog.records)
+
+    async def _run() -> None:
+        hold = engine.connect()  # occupy the only slot, like a stuck finalize thread
+        task = asyncio.create_task(worker.run())
+        try:
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and _retries() == 0:
+                await asyncio.sleep(0.02)
+            assert _retries() > 0, f"pool exhaustion never backed off: {caplog.text}"
+            assert not task.done(), "run() exited on a pool checkout timeout"
+            hold.close()
+            await asyncio.sleep(0.5)
+            settled = _retries()
+            await asyncio.sleep(0.5)
+            assert _retries() == settled, "claims still failing after the pool recovered"
+            assert not task.done()
+        finally:
+            hold.close()
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    try:
+        asyncio.run(_run())
+    finally:
+        engine.dispose()
+
+
+async def _never_called(_item: ClaimedWork) -> HandlerResult:
+    raise AssertionError("no work should be claimed in this test")
 
 
 def test_run_survives_transient_claim_error_then_processes(
