@@ -1,4 +1,4 @@
-.PHONY: check lint type-check tsc test
+.PHONY: check lint type-check tsc test playwright-install
 
 check: lint type-check tsc test
 
@@ -15,3 +15,8 @@ tsc:
 
 test:
 	uv run pytest
+
+# Optional browser smoke only. The pytest suite skips it when the browser is
+# absent, so this is not part of `check`.
+playwright-install:
+	uv run playwright install chromium

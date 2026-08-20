@@ -262,6 +262,12 @@ def build_snapshot(
 ) -> SnapshotResponse:
     """Assemble the snapshot from Postgres + already-fetched sim ledgers. No HTTP here."""
     orders = list(session.scalars(select(Order).where(Order.cohort_id == cohort_id)))
+    # Test seam. The isolation guarantee is specifically that a commit landing
+    # *between* the orders read and the events read stays invisible, and there
+    # is no way to interleave exactly there from outside. Committing before the
+    # first read instead would make the READ COMMITTED characterization test
+    # pass for the wrong reason, so the hook has to live here. Always None in
+    # production; a module-level hook would be worse under the threadpool.
     if after_orders is not None:
         after_orders()
     cohort_order_ids = {order.id for order in orders}

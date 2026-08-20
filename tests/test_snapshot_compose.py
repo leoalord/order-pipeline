@@ -339,12 +339,14 @@ def test_snapshot_isolation_zero_false_mismatches_under_load(
     worker = threading.Thread(target=produce, daemon=True)
     worker.start()
     samples: list[int] = []
+    stage_vectors: list[tuple[tuple[str, int], ...]] = []
     try:
         deadline = time.monotonic() + 95.0
         while len(samples) < 500 and time.monotonic() < deadline:
             started = time.monotonic()
             body = _snapshot(cohort_id=cohort_id)
             samples.append(int(body["state_vs_last_order_events_mismatches"]))
+            stage_vectors.append(tuple(sorted(body["stages"].items())))
             pause = 0.05 - (time.monotonic() - started)
             if pause > 0:
                 time.sleep(pause)
@@ -354,6 +356,13 @@ def test_snapshot_isolation_zero_false_mismatches_under_load(
 
     assert not errors, errors[:3]
     assert len(samples) >= 500, len(samples)
+    # A quiet cohort cannot flash a false mismatch, so zero mismatches across a
+    # static pipeline proves nothing. Require the sampled window to actually
+    # contain committed transitions, or this guard silently disarms itself.
+    churn = sum(1 for a, b in zip(stage_vectors, stage_vectors[1:]) if a != b)
+    assert churn >= 50, (
+        f"pipeline too quiet to prove anything: {churn} stage changes across {len(samples)} polls"
+    )
     mismatched = sum(1 for value in samples if value)
     assert mismatched == 0, (
         f"{mismatched}/{len(samples)} polls flashed state_vs_last_order_events_mismatches "

@@ -672,13 +672,26 @@ export function HomePage() {
   };
 
   // Unavailable evidence is not a passing proof. A green check inside a red
-  // card is the contradiction this avoids.
-  const correctnessTone: "healthy" | "fault" | "unknown" =
-    !snapshot || snapshot.duplicate_effects === null
-      ? "unknown"
-      : (conservation?.residual ?? 0) === 0 && snapshot.duplicate_effects === 0
-        ? "healthy"
-        : "fault";
+  // card is the contradiction this avoids. The headline moves on the same
+  // independent evidence the drawer leads with — residual is a partition of one
+  // `orders` SELECT, so it proves nothing on its own and is not an input here.
+  // A known fault outranks unknown; an unavailable ledger stays unknown.
+  const independentFaults = snapshot
+    ? [
+        snapshot.state_vs_last_order_events_mismatches,
+        snapshot.startup_scan,
+        snapshot.invalid_transitions,
+        snapshot.orphaned_tickets,
+        snapshot.duplicate_effects,
+      ].some((value) => (value ?? 0) !== 0)
+    : false;
+  const correctnessTone: "healthy" | "fault" | "unknown" = !snapshot
+    ? "unknown"
+    : independentFaults
+      ? "fault"
+      : snapshot.duplicate_effects === null
+        ? "unknown"
+        : "healthy";
 
   const scenario = SCENARIO_COPY[activeScenario];
   // A global blackout fails every confirm, so the standing copy about ordinary
@@ -1006,7 +1019,8 @@ export function HomePage() {
                     : `${conservation?.accepted ?? 0} orders reconciled`}
               </strong>
               <b>
-                Funnel partition {fmt(conservation?.residual)} · duplicate effects{" "}
+                {fmt(snapshot?.state_vs_last_order_events_mismatches)} state/event ·{" "}
+                {fmt(snapshot?.startup_scan)} no work item · duplicate effects{" "}
                 {snapshot?.duplicate_effects === null
                   ? "unavailable"
                   : fmt(snapshot?.duplicate_effects)}
@@ -1426,8 +1440,13 @@ function CorrectnessDetails({ snapshot }: { snapshot: Snapshot | null }) {
   const proof = snapshot?.conservation;
   const parked = snapshot?.parked_list ?? [];
   const stalled = snapshot?.no_progress_beyond_threshold.count;
-  const parkedOrStalled =
-    snapshot == null ? null : parked.length + (stalled ?? 0);
+  // Parked work is owned and has a next action — visibility, not an invariant
+  // break. The runbook calls a non-empty parked list expected shedding, so it
+  // must never render as a correctness fault.
+  const parkedTone: MetricTone =
+    snapshot == null ? "unknown" : parked.length === 0 ? "healthy" : "neutral";
+  const stalledTone: MetricTone =
+    snapshot == null ? "unknown" : (stalled ?? 0) === 0 ? "healthy" : "pressure";
   return (
     <div className="drawer-content">
       <section className="proof-equation">
@@ -1453,9 +1472,9 @@ function CorrectnessDetails({ snapshot }: { snapshot: Snapshot | null }) {
           tone={metricTone(snapshot?.state_vs_last_order_events_mismatches)}
         />
         <Metric
-          label="accepted orders with no work item"
+          label="Accepted orders with no work item"
           value={fmt(snapshot?.startup_scan)}
-          detail="startup_scan — the lost-insert detector"
+          detail="startup_scan — crash timeline B; a work item that never landed"
           tone={metricTone(snapshot?.startup_scan)}
         />
         <Metric
@@ -1469,16 +1488,16 @@ function CorrectnessDetails({ snapshot }: { snapshot: Snapshot | null }) {
           tone={metricTone(snapshot?.duplicate_effects)}
         />
         <Metric
-          label="Parked / no-progress"
-          value={`${fmt(snapshot == null ? null : parked.length)} / ${fmt(stalled)}`}
-          detail="parked work items · orders with no progress beyond threshold"
-          tone={metricTone(parkedOrStalled)}
+          label="Parked work"
+          value={fmt(snapshot == null ? null : parked.length)}
+          detail="owned, with a next action — visibility, not an invariant break"
+          tone={parkedTone}
         />
         <Metric
-          label="Conservation residual"
-          value={fmt(proof?.residual)}
-          detail="Partition of one orders SELECT (in_flight = not terminal). Cannot detect a lost insert."
-          tone={metricTone(proof?.residual)}
+          label="No progress beyond threshold"
+          value={fmt(stalled)}
+          detail={`orders idle past ${fmt(snapshot?.no_progress_beyond_threshold.threshold_s)}s`}
+          tone={stalledTone}
         />
         <Metric
           label="Invalid transitions"
@@ -1491,6 +1510,12 @@ function CorrectnessDetails({ snapshot }: { snapshot: Snapshot | null }) {
           value={fmt(snapshot?.orphaned_tickets)}
           detail="downstream effects without live work"
           tone={metricTone(snapshot?.orphaned_tickets)}
+        />
+        <Metric
+          label="Conservation residual"
+          value={fmt(proof?.residual)}
+          detail="Partition of one orders SELECT (in_flight = not terminal). Cannot detect a lost insert."
+          tone={metricTone(proof?.residual)}
         />
       </div>
       <section className="drawer-section">
