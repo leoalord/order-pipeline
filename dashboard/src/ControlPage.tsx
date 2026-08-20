@@ -64,6 +64,32 @@ async function post(
   return { path, status: response.status, body: text };
 }
 
+function failureMessage(result: LastPost): string {
+  try {
+    const parsed = JSON.parse(result.body) as {
+      detail?: {
+        aborted?: unknown;
+        hint?: unknown;
+        reason?: unknown;
+        diagnostic?: { reason?: unknown };
+      };
+    };
+    const detail = parsed.detail;
+    if (detail) {
+      const reason = detail.hint ?? detail.reason ?? detail.diagnostic?.reason;
+      const parts = [detail.aborted, reason].filter(
+        (value): value is string => typeof value === "string" && value.length > 0,
+      );
+      if (parts.length > 0) {
+        return parts.join(" · ");
+      }
+    }
+  } catch {
+    // Fall back to the raw response for non-JSON proxy and network errors.
+  }
+  return result.body.slice(0, 320);
+}
+
 export function scenarioLabel(scenario: ScenarioId): string {
   return {
     ready: "Ready",
@@ -144,7 +170,7 @@ export function PresenterRail({
       setLast(result);
       if (result.status < 200 || result.status >= 300) {
         throw new Error(
-          `${path} returned ${result.status}: ${result.body.slice(0, 160)}`,
+          `${path} returned ${result.status}: ${failureMessage(result)}`,
         );
       }
       if (scenario) {
@@ -262,7 +288,7 @@ export function PresenterRail({
     const steps: Array<
       [string, Record<string, string | number> | undefined]
     > = [
-      ["/loadgen/stop", undefined],
+      ["/loadgen/stop?wait=false", undefined],
       ["/rsim/admin/faults", { mode: "clear" }],
       ["/csim/admin/faults", { mode: "clear" }],
       [
@@ -285,7 +311,7 @@ export function PresenterRail({
         setLast(result);
         if (result.status < 200 || result.status >= 300) {
           throw new Error(
-            `${path} returned ${result.status}: ${result.body.slice(0, 160)}`,
+            `${path} returned ${result.status}: ${failureMessage(result)}`,
           );
         }
       }

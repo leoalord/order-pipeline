@@ -137,6 +137,8 @@ def test_calibrate_reports_h_and_429_mix() -> None:
         assert "h" in body
         assert isinstance(body["h"], (int, float))
         assert body["h"] > 0
+        assert body["h_source"] == "calibrated"
+        assert body["measured_h"] == body["h"]
         assert body["downstream_429_observed"] is True
         mix = body["http_429s"]
         assert set(mix) == {"door", "kitchen", "courier"}

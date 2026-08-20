@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import random
 import time
-import uuid
 from typing import Any
 from uuid import UUID
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from order_pipeline.loadgen.app import create_app
@@ -147,7 +147,8 @@ def test_conservative_default_h_allows_scenarios_before_calibration() -> None:
 
     assert driver.h == 0.25
     assert driver.steady_rps() == 0.1
-    assert driver.rush_rps() == 0.375
+    with pytest.raises(RuntimeError, match="measured calibration H"):
+        driver.rush_rps()
 
 
 def test_status_reports_the_fallback_h_as_unmeasured() -> None:
@@ -237,12 +238,14 @@ def test_calibrate_h_is_last_flat_step_when_backlog_climbs() -> None:
         return result
 
     body = asyncio.run(run())
-    assert body["h"] == 0.0
+    assert body["h"] == settings.default_h
+    assert body["h_source"] == "fallback"
+    assert body["measured_h"] is None
     assert body["http_429s"]["kitchen"] == 2
     assert body["steps"][0]["flat"] is False
 
 
-def test_zero_h_refuses_steady_and_rush() -> None:
+def test_failed_calibration_restores_normal_fallback_but_refuses_rush() -> None:
     fake = FakePipeline()
     fake.backlog_end = 40
     fake.drain_after_snapshots = 2
@@ -254,14 +257,16 @@ def test_zero_h_refuses_steady_and_rush() -> None:
             json={"step_s": 0.05, "start_rps": 1.0, "factor": 2.0, "max_rps": 1.0},
         )
         assert calibrated.status_code == 200
-        assert calibrated.json()["h"] == 0.0
+        assert calibrated.json()["h"] == 0.25
+        assert calibrated.json()["h_source"] == "fallback"
+        assert calibrated.json()["measured_h"] is None
         steady = client.post("/scenario/steady")
         rush = client.post("/scenario/rush")
 
-    assert steady.status_code == 409
+    assert steady.status_code == 200
+    assert steady.json()["rate_rps"] == 0.1
     assert rush.status_code == 409
-    assert "did not find a sustainable H" in steady.json()["detail"]
-    assert "did not find a sustainable H" in rush.json()["detail"]
+    assert "measured calibration H" in rush.json()["detail"]
 
 
 def test_calibrate_rejects_flat_backlog_with_over_age_or_new_park() -> None:
@@ -290,7 +295,8 @@ def test_calibrate_rejects_flat_backlog_with_over_age_or_new_park() -> None:
         return result
 
     body = asyncio.run(run())
-    assert body["h"] == 0.0
+    assert body["h"] == driver.settings.default_h
+    assert body["measured_h"] is None
     assert body["steps"][0]["backlog_flat"] is True
     assert body["steps"][0]["oldest_within_bound"] is False
     assert body["steps"][0]["no_new_parks"] is False
@@ -645,6 +651,73 @@ def test_status_splits_offered_accepted_door_other_http_and_transport() -> None:
     }
 
 
+def test_new_cohort_resets_visible_load_counters() -> None:
+    driver = OpenLoopDriver(loadgen_settings(), FakePipeline())
+
+    asyncio.run(driver._place_one())
+    assert driver.load_counters()["accepted"] == 1
+
+    original = driver.cohort_id
+    minted = driver.new_cohort()
+
+    assert minted != original
+    assert driver.load_counters() == driver._empty_load_counters()
+
+
+class DelayedAcceptedPipeline(FakePipeline):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def place(self, *, items: list[str], cohort_id: UUID, place_key: str) -> int:
+        self.places.append((list(items), cohort_id))
+        self.place_keys.append(place_key)
+        self.started.set()
+        await self.release.wait()
+        return 201
+
+
+def test_late_old_cohort_completion_does_not_contaminate_new_counts() -> None:
+    fake = DelayedAcceptedPipeline()
+    driver = OpenLoopDriver(loadgen_settings(), fake)
+
+    async def run() -> None:
+        pending = asyncio.create_task(driver._place_one())
+        await fake.started.wait()
+        driver.new_cohort()
+        fake.release.set()
+        await pending
+
+    asyncio.run(run())
+    assert driver.load_counters() == driver._empty_load_counters()
+
+
+def test_non_429_http_invalidates_a_calibration_step() -> None:
+    driver = OpenLoopDriver(
+        loadgen_settings(calibrate_stale_abort_steps=1),
+        FakePipeline(place_status=503),
+    )
+
+    async def run() -> dict[str, Any]:
+        await driver.start()
+        result = await driver.calibrate(
+            step_s=0.05,
+            start_rps=1.0,
+            factor=2.0,
+            max_rps=1.0,
+        )
+        await driver.aclose()
+        return result
+
+    body = asyncio.run(run())
+    assert body["h_source"] == "fallback"
+    assert body["measured_h"] is None
+    assert body["other_http"] == 1
+    assert body["steps"][0]["other_http_clean"] is False
+    assert body["steps"][0]["flat"] is False
+
+
 class TransportDuringCalibrate(FakePipeline):
     async def place(self, *, items: list[str], cohort_id: UUID, place_key: str) -> int:
         self.places.append((list(items), cohort_id))
@@ -678,7 +751,8 @@ def test_unresolved_transport_invalidates_a_calibration_step() -> None:
         return result
 
     body = asyncio.run(run())
-    assert body["h"] == 0.0
+    assert body["h"] == driver.settings.default_h
+    assert body["measured_h"] is None
     assert body["transport_unknown"] >= 1
     assert body["steps"][0]["transport_clean"] is False
     assert body["steps"][0]["flat"] is False
@@ -714,7 +788,8 @@ def test_calibrate_drains_step_requests_before_certifying_transport_clean() -> N
         return result
 
     body = asyncio.run(run())
-    assert body["h"] == 0.0
+    assert body["h"] == driver.settings.default_h
+    assert body["measured_h"] is None
     assert body["transport_unknown"] == 1
     assert body["steps"][0]["transport_unknown"] == 1
     assert body["steps"][0]["transport_clean"] is False
@@ -756,7 +831,9 @@ def test_calibrate_aborts_when_h_stays_zero() -> None:
         return result
 
     body = asyncio.run(run())
-    assert body["h"] == 0.0
+    assert body["h"] == driver.settings.default_h
+    assert body["h_source"] == "fallback"
+    assert body["measured_h"] is None
     assert body["aborted"] == "h_still_zero"
     assert len(body["steps"]) == 2
     assert body["diagnostic"]["parked_count"] == 1
@@ -1119,13 +1196,19 @@ def test_observe_drain_rejects_first_one_item_decline_from_peak() -> None:
     assert body["backlog_recovered"] is False
 
 
-class AgeBelowPeakPipeline:
+class AgeNetDeclinePipeline:
+    def __init__(self) -> None:
+        self.snapshots = 0
+
     async def place(self, *, items: list[str], cohort_id: UUID, place_key: str) -> int:
         del items, cohort_id, place_key
         return 201
 
     async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
         del cohort_id
+        ages = (20.0, 21.0, 15.0)
+        age = ages[min(self.snapshots, len(ages) - 1)]
+        self.snapshots += 1
         return {
             "backlog": {
                 "confirm": 0,
@@ -1133,8 +1216,8 @@ class AgeBelowPeakPipeline:
                 "dispatch": 0,
                 "poll_ride": 0,
             },
-            "oldest_open": {"age_s": 20.0, "stage": "placed"},
-            "oldest_unparked": {"age_s": 20.0, "stage": "placed"},
+            "oldest_open": {"age_s": age, "stage": "placed"},
+            "oldest_unparked": {"age_s": age, "stage": "placed"},
             "http_429s": {"door": 0, "kitchen": 0, "courier": 0},
             "parked_list": [],
             "currently_leased": 0,
@@ -1144,10 +1227,10 @@ class AgeBelowPeakPipeline:
         return None
 
 
-def test_observe_drain_accepts_age_sustained_below_peak() -> None:
+def test_observe_drain_accepts_material_net_age_decline() -> None:
     app = create_app(
         loadgen_settings(recovery_streak=3, drain_poll_s=0.01, drain_timeout_s=0.1),
-        client=AgeBelowPeakPipeline(),
+        client=AgeNetDeclinePipeline(),
     )
     with TestClient(app) as client:
         response = client.post(
@@ -1168,6 +1251,38 @@ def test_observe_drain_accepts_age_sustained_below_peak() -> None:
     assert body["age_recovered"] is True
 
 
+class RisingBelowPeakPipeline(AgeNetDeclinePipeline):
+    async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
+        body = await super().snapshot(cohort_id)
+        age = 20.0 + self.snapshots * 0.1
+        body["oldest_open"]["age_s"] = age
+        body["oldest_unparked"]["age_s"] = age
+        return body
+
+
+def test_observe_drain_rejects_age_that_is_rising_below_peak() -> None:
+    app = create_app(
+        loadgen_settings(recovery_streak=3, drain_poll_s=0.01, drain_timeout_s=0.06),
+        client=RisingBelowPeakPipeline(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/observe-drain",
+            json={
+                "baseline_backlog": 0,
+                "baseline_age_s": 1.0,
+                "peak_backlog": 8,
+                "peak_age_s": 40.0,
+                "timeout_s": 0.06,
+            },
+        )
+    assert response.status_code == 504, response.text
+    body = response.json()["detail"]
+    assert body["recovered"] is False
+    assert body["backlog_recovered"] is True
+    assert body["age_recovered"] is False
+
+
 class TimeoutThenMintCohort(TimeoutAfterCommit):
     """Commit-then-timeout, then mint a new cohort before the replay."""
 
@@ -1183,7 +1298,7 @@ class TimeoutThenMintCohort(TimeoutAfterCommit):
         if self.calls == 1:
             self.committed += 1
             assert self.driver is not None
-            self.driver.cohort_id = uuid.uuid4()
+            self.driver.new_cohort()
             raise httpx.ReadTimeout("lost after commit")
         return 201
 
@@ -1200,7 +1315,8 @@ def test_place_timeout_replay_keeps_frozen_cohort_after_mint() -> None:
     assert fake.bodies[0] == fake.bodies[1]
     assert fake.cohorts == [original, original]
     assert driver.cohort_id != original
-    assert driver.placed == 1
+    assert fake.committed == 1
+    assert driver.load_counters() == driver._empty_load_counters()
 
 
 def test_calibrate_stops_then_quiesces_before_minting() -> None:
@@ -1280,7 +1396,9 @@ def test_calibrate_504s_when_starting_quiesce_times_out() -> None:
         )
     assert response.status_code == 504, response.text
     body = response.json()["detail"]
-    assert body["h"] == 0.0
+    assert body["h"] == 0.25
+    assert body["h_source"] == "fallback"
+    assert body["measured_h"] is None
     assert body["aborted"] == "prior_quiesce_timeout"
     assert body["prior_quiesce"]["timed_out"] is True
     assert body["steps"] == []
@@ -1299,7 +1417,9 @@ def test_calibrate_504s_when_final_quiesce_times_out() -> None:
         )
     assert response.status_code == 504, response.text
     body = response.json()["detail"]
-    assert body["h"] == 0.0
+    assert body["h"] == 0.25
+    assert body["h_source"] == "fallback"
+    assert body["measured_h"] == 1.0
     assert body["aborted"] == "final_quiesce_timeout"
     assert body["prior_quiesce"]["quiesced"] is True
     assert body["final_quiesce"]["timed_out"] is True
@@ -1319,6 +1439,91 @@ def test_stop_endpoint_returns_504_when_pipeline_still_busy() -> None:
     assert body["timed_out"] is True
     assert body["quiesced"] is False
     assert body["in_service"] == 6
+
+
+class SnapshotUnavailablePipeline(NeverQuiescePipeline):
+    async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
+        del cohort_id
+        raise httpx.ReadTimeout("snapshot stalled")
+
+
+class OneSnapshotFailurePipeline(FakePipeline):
+    def __init__(self) -> None:
+        super().__init__()
+        self.snapshot_calls = 0
+
+    async def snapshot(self, cohort_id: UUID) -> dict[str, Any]:
+        self.snapshot_calls += 1
+        if self.snapshot_calls == 1:
+            raise httpx.ReadTimeout("snapshot stalled once")
+        return await super().snapshot(cohort_id)
+
+
+def test_stop_retries_transient_snapshot_failure() -> None:
+    app = create_app(
+        loadgen_settings(drain_timeout_s=0.1, drain_poll_s=0.01),
+        client=OneSnapshotFailurePipeline(),
+    )
+    with TestClient(app) as client:
+        response = client.post("/stop")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["quiesced"] is True
+    assert body["snapshot_errors"] == 1
+
+
+def test_stop_returns_diagnostic_504_when_snapshots_stay_unavailable() -> None:
+    app = create_app(
+        loadgen_settings(drain_timeout_s=0.04, drain_poll_s=0.01),
+        client=SnapshotUnavailablePipeline(),
+    )
+    with TestClient(app) as client:
+        response = client.post("/stop")
+    assert response.status_code == 504, response.text
+    body = response.json()["detail"]
+    assert body["timed_out"] is True
+    assert body["snapshot_errors"] >= 1
+    assert "snapshot unavailable" in body["reason"]
+
+
+def test_reset_stop_skips_pipeline_wait_but_still_stops_arrivals() -> None:
+    app = create_app(
+        loadgen_settings(drain_timeout_s=1.0, drain_poll_s=0.01),
+        client=NeverQuiescePipeline(),
+    )
+    app.state.driver.set_rate(2.0)
+    started = time.monotonic()
+    with TestClient(app) as client:
+        response = client.post("/stop?wait=false")
+    elapsed = time.monotonic() - started
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["rate_rps"] == 0.0
+    assert body["waited_for_pipeline"] is False
+    assert body["quiesced"] is None
+    assert elapsed < 0.5
+
+
+def test_observe_drain_returns_504_when_snapshots_stay_unavailable() -> None:
+    app = create_app(
+        loadgen_settings(drain_timeout_s=0.04, drain_poll_s=0.01),
+        client=SnapshotUnavailablePipeline(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/observe-drain",
+            json={
+                "baseline_backlog": 0,
+                "baseline_age_s": 1.0,
+                "peak_backlog": 8,
+                "peak_age_s": 20.0,
+                "timeout_s": 0.04,
+            },
+        )
+    assert response.status_code == 504, response.text
+    body = response.json()["detail"]
+    assert body["snapshot_errors"] >= 1
+    assert "snapshot unavailable" in body["reason"]
 
 
 def test_oldest_unparked_age_is_none_when_only_parked_work_remains() -> None:

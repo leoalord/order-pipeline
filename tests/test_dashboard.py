@@ -139,6 +139,8 @@ def test_presenter_rail_posts_existing_scenarios_on_unified_surface() -> None:
     assert "disabled={disabled || !hasBaseline}" in control
     assert "disabled={disabled || !calibrated}" in control
     assert 'loadgen?.h_source === "calibrated"' in control
+    assert '"/loadgen/stop?wait=false"' in control
+    assert "failureMessage(result)" in control
     assert "Promise.allSettled" in control
     assert "start += 8" in control
     assert "redriveWorkItem(job.id)" in control

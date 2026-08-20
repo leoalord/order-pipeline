@@ -171,9 +171,12 @@ def test_scenario_0_steady_walk_and_scenario_1_rush() -> None:
         timeout=240.0,
     )
     assert calibrated.status_code == 200, calibrated.text
-    h = calibrated.json()["h"]
+    calibrated_body = calibrated.json()
+    h = calibrated_body["h"]
     assert isinstance(h, (int, float))
     assert h > 0, calibrated.json()
+    assert calibrated_body["h_source"] == "calibrated", calibrated_body
+    assert calibrated_body["measured_h"] == h, calibrated_body
     reset = _http("POST", f"{LOADGEN_URL}/cohort/new")
     assert reset.status_code == 200, reset.text
     cohort_id = reset.json()["cohort_id"]

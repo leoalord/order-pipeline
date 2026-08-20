@@ -6,6 +6,7 @@ import asyncio
 import random
 import time
 import uuid
+from collections import deque
 from typing import Any
 from uuid import UUID
 
@@ -190,6 +191,28 @@ class OpenLoopDriver:
             "transport_unknown": self.transport_unknown,
         }
 
+    @staticmethod
+    def _empty_load_counters() -> dict[str, int]:
+        return {
+            "offered": 0,
+            "accepted": 0,
+            "door_429": 0,
+            "other_http": 0,
+            "transport_unknown": 0,
+        }
+
+    def _reset_load_counters(self) -> None:
+        self.offered = 0
+        self.placed = 0
+        self.rejected_429 = 0
+        self.other_http = 0
+        self.transport_unknown = 0
+
+    def _activate_fallback_h(self) -> None:
+        """Keep Normal usable without presenting a failed calibration as measured."""
+        self.h = self.settings.default_h
+        self.h_source = "fallback"
+
     def snapshot_status(self) -> dict[str, Any]:
         return {
             "cohort_id": str(self.cohort_id),
@@ -237,6 +260,7 @@ class OpenLoopDriver:
 
     def new_cohort(self) -> UUID:
         self.cohort_id = uuid.uuid4()
+        self._reset_load_counters()
         return self.cohort_id
 
     def set_rate(self, rps: float) -> None:
@@ -283,6 +307,8 @@ class OpenLoopDriver:
             "waiting_backlog": result.get("waiting_backlog"),
             "in_service": result.get("in_service"),
             "currently_leased": result.get("currently_leased"),
+            "snapshot_errors": result.get("snapshot_errors", 0),
+            "last_snapshot_error": result.get("last_snapshot_error"),
         }
 
     async def _quiesce_pipeline(self, *, timeout_s: float) -> dict[str, Any]:
@@ -295,28 +321,47 @@ class OpenLoopDriver:
             "parked": 0,
             "oldest_age_s": None,
         }
+        snapshot_errors = 0
+        last_snapshot_error: str | None = None
         while True:
-            snapshot = await self.client.snapshot(self.cohort_id)
-            last = self._activity_from_snapshot(snapshot)
-            if not self._pipeline_busy(snapshot):
-                return {
-                    "quiesced": True,
-                    "timed_out": False,
-                    "reason": None,
-                    **last,
-                }
+            try:
+                snapshot = await self.client.snapshot(self.cohort_id)
+            except Exception as exc:
+                snapshot_errors += 1
+                last_snapshot_error = f"{type(exc).__name__}: {exc}"
+            else:
+                last_snapshot_error = None
+                last = self._activity_from_snapshot(snapshot)
+                if not self._pipeline_busy(snapshot):
+                    return {
+                        "quiesced": True,
+                        "timed_out": False,
+                        "reason": None,
+                        "snapshot_errors": snapshot_errors,
+                        "last_snapshot_error": last_snapshot_error,
+                        **last,
+                    }
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
             await asyncio.sleep(min(self.settings.drain_poll_s, remaining))
-        return {
-            "quiesced": False,
-            "timed_out": True,
-            "reason": (
+        if last_snapshot_error is not None:
+            reason = (
+                "pipeline quiescence could not be verified: snapshot unavailable "
+                f"({last_snapshot_error})"
+            )
+        else:
+            reason = (
                 "pipeline still busy after stop: waiting "
                 f"{last['waiting_backlog']}, in_service {last['in_service']}, "
                 f"leased {last['currently_leased']}"
-            ),
+            )
+        return {
+            "quiesced": False,
+            "timed_out": True,
+            "reason": reason,
+            "snapshot_errors": snapshot_errors,
+            "last_snapshot_error": last_snapshot_error,
             **last,
         }
 
@@ -335,6 +380,21 @@ class OpenLoopDriver:
         status.update(pipeline)
         return status
 
+    async def stop_and_drain_http(self) -> dict[str, Any]:
+        """Fast abort for Reset: stop arrivals and resolve POSTs, but do not await rails."""
+        self.stop()
+        await self._drain_http()
+        status = self.snapshot_status()
+        status.update(
+            {
+                "quiesced": None,
+                "timed_out": False,
+                "reason": None,
+                "waited_for_pipeline": False,
+            }
+        )
+        return status
+
     def steady_rps(self) -> float:
         if self.h is None or self.h <= 0:
             raise RuntimeError("calibrate did not find a sustainable H")
@@ -343,6 +403,8 @@ class OpenLoopDriver:
     def rush_rps(self, mult: float = 1.0) -> float:
         if self.h is None or self.h <= 0:
             raise RuntimeError("calibrate did not find a sustainable H")
+        if self.h_source != "calibrated":
+            raise RuntimeError("rush requires a measured calibration H")
         return self.settings.rush_multiplier * self.h * mult
 
     async def _run_loop(self) -> None:
@@ -415,8 +477,13 @@ class OpenLoopDriver:
                     raise
                 if attempt + 1 < attempts:
                     continue
-                self.transport_unknown += 1
+                if cohort_id == self.cohort_id:
+                    self.transport_unknown += 1
                 return
+        # New cohort resets the visible counters. A late completion from the
+        # frozen old cohort must not leak into the new cohort's evidence.
+        if cohort_id != self.cohort_id:
+            return
         if status == 201:
             self.placed += 1
         elif status == 429:
@@ -463,10 +530,11 @@ class OpenLoopDriver:
         prior = await self.stop_and_drain()
         prior_summary = self._quiesce_summary(prior)
         if prior.get("timed_out"):
-            self.h = 0.0
-            self.h_source = "calibration_failed"
+            self._activate_fallback_h()
             return {
-                "h": 0.0,
+                "h": self.h,
+                "h_source": self.h_source,
+                "measured_h": None,
                 "cohort_id": str(self.cohort_id),
                 "http_429s": {"door": 0, "kitchen": 0, "courier": 0},
                 "door_first": False,
@@ -479,7 +547,7 @@ class OpenLoopDriver:
                 "prior_quiesce": prior_summary,
                 "final_quiesce": None,
                 "timed_out": True,
-                **self.load_counters(),
+                **self._empty_load_counters(),
             }
         self.new_cohort()
         steps: list[dict[str, Any]] = []
@@ -525,6 +593,7 @@ class OpenLoopDriver:
             no_new_failures = failed_count(last) <= failed_count(first)
             no_new_stalls = no_progress_count(last) <= no_progress_count(first)
             transport_clean = counters["transport_unknown"] == 0
+            other_http_clean = counters["other_http"] == 0
             flat = (
                 backlog_flat
                 and oldest_within_bound
@@ -532,6 +601,7 @@ class OpenLoopDriver:
                 and no_new_failures
                 and no_new_stalls
                 and transport_clean
+                and other_http_clean
             )
             steps.append(
                 {
@@ -548,6 +618,7 @@ class OpenLoopDriver:
                     "no_new_failures": no_new_failures,
                     "no_new_stalls": no_new_stalls,
                     "transport_clean": transport_clean,
+                    "other_http_clean": other_http_clean,
                     "flat": flat,
                     **counters,
                 }
@@ -586,18 +657,24 @@ class OpenLoopDriver:
         # bikes, or worker leases. The presenter mints the demo cohort next.
         final = await self._quiesce_pipeline(timeout_s=self.settings.drain_timeout_s)
         final_summary = self._quiesce_summary(final)
+        measured_h = h if h > 0 else None
         if final.get("timed_out"):
-            h = 0.0
             aborted = "final_quiesce_timeout"
             diagnostic = final_summary
-        self.h = h
-        self.h_source = "calibration_failed" if final.get("timed_out") else "calibrated"
+        calibration_succeeded = measured_h is not None and aborted is None
+        if calibration_succeeded:
+            self.h = measured_h
+            self.h_source = "calibrated"
+        else:
+            self._activate_fallback_h()
         # Snapshot counters are cohort-cumulative. Restrict this decision to
         # brake events observed during this calibration so an earlier run
         # cannot poison the result after the operator raises the door cap.
         door_first = first_brake == "door"
         result: dict[str, Any] = {
-            "h": h,
+            "h": self.h,
+            "h_source": self.h_source,
+            "measured_h": measured_h,
             "cohort_id": str(self.cohort_id),
             "http_429s": last_mix,
             "door_first": door_first,
@@ -663,24 +740,38 @@ class OpenLoopDriver:
         """
         base_backlog = self._rush_baseline_backlog if baseline_backlog is None else baseline_backlog
         base_age = self._rush_baseline_age_s if baseline_age_s is None else baseline_age_s
-        if base_backlog is None or base_age is None:
-            snap = await self.client.snapshot(self.cohort_id)
+        limit = self.settings.drain_timeout_s if timeout_s is None else timeout_s
+        deadline = time.monotonic() + limit
+        snapshot_errors = 0
+        last_snapshot_error: str | None = None
+        while base_backlog is None or base_age is None:
+            try:
+                snap = await self.client.snapshot(self.cohort_id)
+            except Exception as exc:
+                snapshot_errors += 1
+                last_snapshot_error = f"{type(exc).__name__}: {exc}"
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    base_backlog = 0 if base_backlog is None else base_backlog
+                    base_age = 0.0 if base_age is None else base_age
+                    break
+                await asyncio.sleep(min(self.settings.drain_poll_s, remaining))
+                continue
+            last_snapshot_error = None
             if base_backlog is None:
                 base_backlog = waiting_backlog(snap)
             if base_age is None:
                 base_age = oldest_age_s(snap) or 0.0
-        limit = self.settings.drain_timeout_s if timeout_s is None else timeout_s
         streak_k = self.settings.recovery_streak
         backlog_slack = self.settings.recovery_backlog_slack
         age_slack = self.settings.recovery_age_slack_s
-        deadline = time.monotonic() + limit
         seen_peak_backlog = base_backlog if peak_backlog is None else peak_backlog
         seen_peak_age = base_age if peak_age_s is None else peak_age_s
         seen_peak_unparked = seen_peak_age
         prev_waiting: int | None = None
         backlog_streak = 0
-        age_streak = 0
-        unparked_streak = 0
+        age_window: deque[float] = deque(maxlen=streak_k)
+        unparked_window: deque[float] = deque(maxlen=streak_k)
         parked_seen = False
         last_waiting = base_backlog
         last_age = base_age
@@ -688,7 +779,17 @@ class OpenLoopDriver:
         last_parked = 0
         samples = 0
         while time.monotonic() < deadline:
-            snapshot = await self.client.snapshot(self.cohort_id)
+            try:
+                snapshot = await self.client.snapshot(self.cohort_id)
+            except Exception as exc:
+                snapshot_errors += 1
+                last_snapshot_error = f"{type(exc).__name__}: {exc}"
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(self.settings.drain_poll_s, remaining))
+                continue
+            last_snapshot_error = None
             samples += 1
             waiting = waiting_backlog(snapshot)
             age = oldest_age_s(snapshot)
@@ -709,18 +810,14 @@ class OpenLoopDriver:
                 backlog_streak += 1
             else:
                 backlog_streak = 0
-            if age is None and parked == 0:
-                age_streak = streak_k
-            elif age is not None and age < seen_peak_age:
-                age_streak += 1
+            if age is None:
+                age_window.clear()
             else:
-                age_streak = 0
-            if unparked_age is None and parked == 0:
-                unparked_streak = streak_k
-            elif unparked_age is not None and unparked_age < seen_peak_unparked:
-                unparked_streak += 1
+                age_window.append(age)
+            if unparked_age is None:
+                unparked_window.clear()
             else:
-                unparked_streak = 0
+                unparked_window.append(unparked_age)
             prev_waiting = waiting
             waiting_rose = seen_peak_backlog > base_backlog
             backlog_at_baseline = waiting <= base_backlog + backlog_slack
@@ -730,9 +827,21 @@ class OpenLoopDriver:
             unparked_at_baseline = (unparked_age is None and parked == 0) or (
                 unparked_age is not None and unparked_age <= base_age + age_slack
             )
+            age_drop_sustained = self._age_window_recovered(
+                age_window,
+                peak=seen_peak_age,
+                minimum_drop=age_slack,
+                streak_k=streak_k,
+            )
+            unparked_drop_sustained = self._age_window_recovered(
+                unparked_window,
+                peak=seen_peak_unparked,
+                minimum_drop=age_slack,
+                streak_k=streak_k,
+            )
             backlog_recovered = backlog_at_baseline or backlog_streak >= streak_k
-            age_recovered = age_at_baseline or age_streak >= streak_k
-            unparked_age_recovered = unparked_at_baseline or unparked_streak >= streak_k
+            age_recovered = age_at_baseline or age_drop_sustained
+            unparked_age_recovered = unparked_at_baseline or unparked_drop_sustained
             recovered = (
                 waiting_rose and backlog_recovered and (age_recovered or unparked_age_recovered)
             )
@@ -756,6 +865,8 @@ class OpenLoopDriver:
                     "oldest_age_s": age,
                     "oldest_unparked_age_s": unparked_age,
                     "samples": samples,
+                    "snapshot_errors": snapshot_errors,
+                    "last_snapshot_error": last_snapshot_error,
                     "reason": None,
                 }
             remaining = deadline - time.monotonic()
@@ -783,13 +894,38 @@ class OpenLoopDriver:
             "oldest_age_s": last_age,
             "oldest_unparked_age_s": last_unparked,
             "samples": samples,
+            "snapshot_errors": snapshot_errors,
+            "last_snapshot_error": last_snapshot_error,
             "reason": (
-                "drain did not sustain waiting-backlog and oldest-age improvement; "
+                (
+                    f"snapshot unavailable: {last_snapshot_error}; "
+                    if last_snapshot_error is not None
+                    else ""
+                )
+                + "drain did not sustain waiting-backlog and oldest-age improvement; "
                 f"waiting={last_waiting} peak_waiting={seen_peak_backlog} "
                 f"age={last_age} peak_age={seen_peak_age} "
                 f"unparked_age={last_unparked_value} parked={last_parked}"
             ),
         }
+
+    @staticmethod
+    def _age_window_recovered(
+        samples: deque[float],
+        *,
+        peak: float,
+        minimum_drop: float,
+        streak_k: int,
+    ) -> bool:
+        """Require a material peak-to-window drop plus net decline across the window."""
+        if len(samples) < streak_k:
+            return False
+        threshold = peak - minimum_drop
+        if any(value > threshold for value in samples):
+            return False
+        if streak_k == 1:
+            return samples[-1] < peak
+        return samples[-1] < samples[0]
 
     async def _rush_then_drain(self, drain_rps: float) -> None:
         try:

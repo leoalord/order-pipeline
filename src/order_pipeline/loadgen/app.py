@@ -167,7 +167,9 @@ def create_app(
         return plan
 
     @app.post("/stop")
-    async def stop() -> dict[str, Any]:
+    async def stop(wait: bool = Query(default=True)) -> dict[str, Any]:
+        if not wait:
+            return await driver.stop_and_drain_http()
         result = await driver.stop_and_drain()
         if result.get("timed_out"):
             raise HTTPException(status_code=504, detail=result)
