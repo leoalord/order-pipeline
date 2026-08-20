@@ -6,6 +6,7 @@ import asyncio
 
 import uvicorn
 from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
 
 from order_pipeline.worker.chassis import Worker
 from order_pipeline.worker.deps import DepCaps
@@ -16,9 +17,14 @@ from order_pipeline.worker.kitchen import KitchenHandlers
 from order_pipeline.worker.settings import WorkerSettings
 
 
+def create_worker_engine(url: str) -> Engine:
+    """Ping on checkout so stale pooled connections are dropped before claim."""
+    return create_engine(url, pool_pre_ping=True)
+
+
 def main() -> None:
     settings = WorkerSettings()
-    engine = create_engine(settings.database_url)
+    engine = create_worker_engine(settings.database_url)
     caps = DepCaps(settings)
     restaurant = RestaurantClient(settings, caps)
     courier = CourierClient(settings, caps)

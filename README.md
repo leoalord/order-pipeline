@@ -63,7 +63,7 @@ Sims run an always-on 3% 5xx / 2% drop mix. The rail's later cards are the on-pu
 
 **03 Outage.** **1 · Doom confirms** tags three orders that must fail confirm. **2 · Blackout** takes the restaurant down for 60s. In-flight work holds; the Restaurant chip reads Fault active. **Recover restaurant** clears it. Doomed orders fail at `accepted_at + 120s`; untagged ones resume.
 
-**04 Worker crash.** **Arm visible lease**, open the Workers drawer, record an order and its owner hostname, then kill that replica from a terminal:
+**04 Worker crash.** **Arm visible lease**, open the Workers drawer, record an order and its owner hostname, then kill that replica from a terminal — the currently-leased card's hostname prefix, not `docker kill $(docker compose ps -q worker | head -1)` (that can hit the idle replica):
 
 ```bash
 docker compose ps -q worker
@@ -76,7 +76,7 @@ The abandoned attempt stays `outcome IS NULL`. A survivor retries the same store
 
 **Cancel race (rehearsal).** The bonus control places and cancels an order timed to collide with submit. Treat it as a rehearsal, not the proof: confirm completes in milliseconds, so a live click can land after `being_prepared`, return `409`, and increment `invalid_transitions`. The proof is `tests/test_cancel_race.py`, which holds confirm in-flight instead of racing a wall clock.
 
-**05 Courier failure.** **Blackout courier · 30s** exhausts dispatch (budget 5). The order stays `ready`; the work item parks. **Recover courier**, then **Redrive** on that parked row — same work-item id and `(order_id, dispatch)` key, one courier-ledger effect. Redrive stays disabled while the fault is armed.
+**05 Courier failure.** **Blackout courier · 30s** exhausts dispatch (budget 5). The order stays `ready`; the work item parks. **Recover courier**, then **Redrive** on that parked row — same work-item id and `(order_id, dispatch)` key, one courier-ledger effect. The dashboard Redrive button stays disabled while the fault is armed (`redriveBlocker` on Watch). `POST /work-items/{id}/redrive` still accepts a mid-fault redrive — the item becomes pending again and parks if the fault is still on; the crash-beat test depends on that.
 
 Health while this runs: the three chips (Restaurant · Workers · Delivery), the correctness drawer (conservation, duplicate attempts vs effects), and `GET /snapshot`.
 
@@ -94,8 +94,8 @@ Cancelling an order that the restaurant already accepted is partial success, and
 - One Python package (`order_pipeline`), one Python image. Restaurant, courier, worker, and loadgen are compose `command:`s. The dashboard is a separate Vite image.
 - The API validates, persists, and returns. Place and cancel never call the sims. `GET /snapshot` is the one additive read the board polls (it does read both sim ledgers for duplicate-effects).
 - Two FastAPI sims share one core (accept, poll, Stripe key cache, SQLite ledger, `/admin/faults`). Kitchen is 20 pans; courier is 8 bikes. Each 429s when the quoted wait is more than 3× that ticket's quiet time.
-- Two workers on a plugin chassis (confirm, poll_cook, void_ticket, dispatch, poll_ride). Each cycle is claim → HTTP → finalize; there is no DB transaction across the outbound call.
-- Intake is a client `Idempotency-Key` plus a body fingerprint. Confirm/dispatch reuse a stored `(order_id, work)` key. Polls reuse the accept/dispatch ticket key, never a per-poll key.
+- Two workers on a plugin chassis (confirm, poll_cook, void_ticket, dispatch, poll_ride). Each cycle is claim → HTTP → finalize; there is no DB transaction across the outbound call. Claim and finalize both run off the asyncio loop so a stuck commit cannot stall health or HTTP timeouts.
+- Intake is a client `Idempotency-Key` plus a body fingerprint. Confirm/dispatch reuse a stored `(order_id, work)` key. Polls reuse the accept/dispatch ticket key, never a per-poll key. That stored key is the double-effect guarantee: a survivor retries the same key and the sim replays. `WORKER_LEASE_S > WORKER_SIM_TIMEOUT_S` is defence in depth so a live call is not stolen under shipped defaults — not because “a lease covers exactly one outbound call.”
 
 ## Decisions
 
@@ -104,6 +104,7 @@ Cancelling an order that the restaurant already accepted is partial success, and
 - **Place-key is identity, body is the conflict check.** Same key + same cart replays; same key + a different cart is `409`, not a merge. Safer than hashing the payload as the identity.
 - **Confirm fails; later work parks.** Confirm is time-bounded (`accepted_at + 120s` → order `failed`). Poll/dispatch exhaust parks the work item, not the order. Park is not a lifecycle stage; Redrive is its only exit and keeps the stored key so a retry cannot mint a second sim effect.
 - **Two keys on poll on purpose.** The work-item key is queue identity (`UNIQUE`). Using it as the sim HTTP key would duplicate effects on retry.
+- **Double-effect is the stored key.** A survivor retries the same `(order_id, work)` key and the sim replays. `lease_s > sim_timeout_s` is defence in depth so a live call is not stolen under shipped defaults. The lease is still dropped after the outbound call so backoff stays unleased; that is occupancy, not the uniqueness proof.
 - **`restart: "no"`.** `restart: always` would reap the abandoned NULL attempt that the worker-crash beat has to show. Two replicas so a survivor can resume.
 - **Cancel is pre-pivot for the diner, post-accept for the kitchen.** The lifecycle allows cancel from `placed` and `confirmed`; after `being_prepared` it is evidence, not a state change. The restaurant is on a different clock: accept *starts service*, so a cancel from `confirmed` is already a cancel of food on a pan. Every way that can happen queues one `void_ticket` under `(order_id, void)` — cancel from `confirmed`, cancel superseding an in-flight confirm, and a confirm that crosses its 120s deadline. Cancel enqueues it itself instead of relying on the losing worker to survive and finalize; both paths take the order row lock first, so the unique key is a backstop rather than a 500.
 - **One Alembic revision, Settings complete at first appearance.** Work types are `TEXT` + `CHECK`, not `ENUM`s, so `void_ticket` did not need `ALTER TYPE`. Growing Settings or the schema across slices would have been migration churn.

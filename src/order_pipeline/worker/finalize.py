@@ -20,6 +20,7 @@ from order_pipeline.models import Attempt, Order, OrderEvent, WorkItem
 from order_pipeline.worker.backoff import full_jitter_delay_s
 from order_pipeline.worker.classify import PERMANENT_OUTCOMES
 from order_pipeline.worker.counters import WorkerCounters
+from order_pipeline.worker.log import log_worker_event
 from order_pipeline.worker.plugin import (
     ClaimedWork,
     GuardedTransition,
@@ -232,6 +233,17 @@ def apply_guarded_transition(
                 applied=True,
             )
         )
+        log_worker_event(
+            "transition",
+            worker_id=claimed.lease_owner,
+            work_item_id=claimed.work_item_id,
+            order_id=claimed.order_id,
+            work_type=claimed.work_type,
+            lease_owner=claimed.lease_owner,
+            from_state=transition.expected_state,
+            to_state=transition.to_state,
+            cause=transition.cause,
+        )
         return True
 
     order = session.get(Order, claimed.order_id)
@@ -382,6 +394,16 @@ def finalize_claim(
         item.park_owner = claimed.lease_owner
         item.park_reason = PARK_REASON_GUARD_REJECTED
         item.park_next_action = PARK_NEXT_ACTION_GUARD_REJECTED
+        log_worker_event(
+            "guard_rejection",
+            worker_id=claimed.lease_owner,
+            work_item_id=claimed.work_item_id,
+            order_id=claimed.order_id,
+            work_type=claimed.work_type,
+            lease_owner=claimed.lease_owner,
+            park_reason=PARK_REASON_GUARD_REJECTED,
+            park_next_action=PARK_NEXT_ACTION_GUARD_REJECTED,
+        )
         return
 
     disposition = policy.disposition or WorkDisposition.COMPLETE
@@ -402,6 +424,16 @@ def finalize_claim(
         item.park_owner = claimed.lease_owner
         item.park_reason = policy.park_reason
         item.park_next_action = policy.park_next_action
+        log_worker_event(
+            "park",
+            worker_id=claimed.lease_owner,
+            work_item_id=claimed.work_item_id,
+            order_id=claimed.order_id,
+            work_type=claimed.work_type,
+            lease_owner=claimed.lease_owner,
+            park_reason=policy.park_reason,
+            park_next_action=policy.park_next_action,
+        )
         return
     if disposition is WorkDisposition.RETRY:
         _release_lease(item)
