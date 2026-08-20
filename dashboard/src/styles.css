@@ -1432,6 +1432,13 @@ button:disabled {
   margin-top: 10px;
 }
 
+.rail-setup .rail-note {
+  margin: 10px 0 0;
+  color: var(--muted-strong);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .rail-setup button {
   background: var(--surface-raised);
   color: var(--muted-strong);

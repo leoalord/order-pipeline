@@ -57,6 +57,10 @@ def _accept(client: TestClient, items: list[str], key: str) -> httpx.Response:
     return response
 
 
+def _time(raw: str) -> datetime:
+    return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+
+
 def test_accept_returns_ticket_under_two_seconds(client: TestClient) -> None:
     key = f"unit-hangup-{uuid.uuid4()}"
     started = time.monotonic()
@@ -133,6 +137,61 @@ def test_second_ticket_queues_when_the_only_pan_is_busy(
             second.json()["service_started_at"].replace("Z", "+00:00")
         )
         assert second_start == first_eta
+
+
+def test_void_frees_the_rail_but_the_original_ticket_still_walks(
+    tmp_path: Path, clock: MutableClock
+) -> None:
+    """Void is a rail release plus a compensation record, not an oven switch.
+
+    The occupancy read is a follow-on quote, not a ledger row count: with one
+    pan, a ticket accepted while the rail is spoken for is `queued`, and one
+    accepted after the voids is `cooking` from its own accepted_at. Both a
+    cooking ticket and a still-waiting one release their claim on the rail.
+    """
+    settings = RSIMSettings(
+        ledger_path=tmp_path / "void-pan.sqlite",
+        flaky_5xx_pct=0.0,
+        flaky_drop_pct=0.0,
+        kitchen_pans=1,
+        rail_fuse=80,
+    )
+    app = build_app(settings, now_fn=clock, blackout_hang_s=0.0)
+    with TestClient(app) as client:
+        cooking_key = f"void-rail-cooking-{uuid.uuid4()}"
+        cooking = _accept(client, ["burrito"], cooking_key)
+        assert cooking.status_code == 200, cooking.text
+        assert cooking.json()["status"] == "cooking"
+        cooking_eta = _time(cooking.json()["estimated_ready_at"])
+
+        # Before: the one pan is taken, so this ticket waits behind it.
+        queued_key = f"void-rail-queued-{uuid.uuid4()}"
+        queued = _accept(client, ["burrito"], queued_key)
+        assert queued.status_code == 200, queued.text
+        assert queued.json()["status"] == "queued"
+        assert _time(queued.json()["service_started_at"]) == cooking_eta
+
+        for key, response in ((cooking_key, cooking), (queued_key, queued)):
+            voided = client.post(
+                "/void",
+                json={"accept_key": key, "ticket_id": response.json()["ticket_id"]},
+                headers={"Idempotency-Key": f"void-rail-{key}"},
+            )
+            assert voided.status_code == 200, voided.text
+            assert voided.json()["voided"] is True
+
+        # After: neither voided ticket holds the rail, so this one starts at once.
+        freed = _accept(client, ["burrito"], f"void-rail-freed-{uuid.uuid4()}")
+        assert freed.status_code == 200, freed.text
+        assert freed.json()["status"] == "cooking"
+        assert freed.json()["service_started_at"] == freed.json()["accepted_at"]
+
+        # The voided key still walks its own ticket: GET-by-key is unchanged.
+        clock.now = cooking_eta + timedelta(seconds=1)
+        walked = client.get(f"/keys/{cooking_key}")
+        assert walked.status_code == 200, walked.text
+        assert walked.json()["ticket_id"] == cooking.json()["ticket_id"]
+        assert walked.json()["status"] == "ready"
 
 
 def test_live_capacity_increase_adds_a_pan_for_new_accepts(

@@ -23,7 +23,7 @@ curl -sS -X POST http://localhost:8000/orders \
   -d '{"items":["chips"]}'
 ```
 
-Menu is `chips` / `taco` / `burrito`, at most 3 items. The same `Idempotency-Key` and body replays the same order; a different cart under that key is `409`. The API accepts and stops. Workers confirm, cook, dispatch, and poll until `delivered`. Cancel is legal only before cooking starts (`placed` / `confirmed`).
+Menu is `chips` / `taco` / `burrito`, at most 3 items. The same `Idempotency-Key` and body replays the same order; a different cart under that key is `409`. The API accepts and stops. Workers confirm, cook, dispatch, and poll until `delivered`. Cancel is legal from `placed` and `confirmed`, and after `being_prepared` it is a counted `409`.
 
 | Service | Port |
 | --- | --- |
@@ -74,9 +74,20 @@ docker compose up -d worker
 
 The abandoned attempt stays `outcome IS NULL`. A survivor retries the same stored key. One applied confirm, no duplicate kitchen effect.
 
+**Cancel race (rehearsal).** The bonus control places and cancels an order timed to collide with submit. Treat it as a rehearsal, not the proof: confirm completes in milliseconds, so a live click can land after `being_prepared`, return `409`, and increment `invalid_transitions`. The proof is `tests/test_cancel_race.py`, which holds confirm in-flight instead of racing a wall clock.
+
 **05 Courier failure.** **Blackout courier · 30s** exhausts dispatch (budget 5). The order stays `ready`; the work item parks. **Recover courier**, then **Redrive** on that parked row — same work-item id and `(order_id, dispatch)` key, one courier-ledger effect. Redrive stays disabled while the fault is armed.
 
 Health while this runs: the three chips (Restaurant · Workers · Delivery), the correctness drawer (conservation, duplicate attempts vs effects), and `GET /snapshot`.
+
+## Cancel and the kitchen
+
+Cancelling an order that the restaurant already accepted is partial success, and the two halves are tracked separately: the diner's book says `cancelled` and never resurrects, while the kitchen-side remainder is a `void_ticket` work item with its own retry budget. What that void does, and does not, do:
+
+- **Accept starts service and decrements stock.** Stock is *consumed*, not restored on void — the kitchen already committed the ingredients. Restoring it would be a different product decision, not a correctness fix.
+- **Void frees rail occupancy.** The pan reopens for the next ticket, which is the part that costs money.
+- **Void is not an oven switch.** `GET /keys/(order, confirm)` still walks `queued → cooking → ready`. The void is a compensation record plus a rail release, recorded under its own key.
+- **A void with nothing to compensate is a no-op, not an orphan.** The sim records `voided: false, absent: true` and replays it. Only an exhausted or permanently rejected void records an orphaned ticket on the correctness pane.
 
 ## Architecture
 
@@ -94,7 +105,7 @@ Health while this runs: the three chips (Restaurant · Workers · Delivery), the
 - **Confirm fails; later work parks.** Confirm is time-bounded (`accepted_at + 120s` → order `failed`). Poll/dispatch exhaust parks the work item, not the order. Park is not a lifecycle stage; Redrive is its only exit and keeps the stored key so a retry cannot mint a second sim effect.
 - **Two keys on poll on purpose.** The work-item key is queue identity (`UNIQUE`). Using it as the sim HTTP key would duplicate effects on retry.
 - **`restart: "no"`.** `restart: always` would reap the abandoned NULL attempt that the worker-crash beat has to show. Two replicas so a survivor can resume.
-- **Cancel is pre-pivot only.** After `being_prepared`, a diner cancel is evidence, not a state change. If confirm loses the race, the 0-row finalize is `superseded_by_cancel` and enqueues `void_ticket`.
+- **Cancel is pre-pivot for the diner, post-accept for the kitchen.** The lifecycle allows cancel from `placed` and `confirmed`; after `being_prepared` it is evidence, not a state change. The restaurant is on a different clock: accept *starts service*, so a cancel from `confirmed` is already a cancel of food on a pan. Every way that can happen queues one `void_ticket` under `(order_id, void)` — cancel from `confirmed`, cancel superseding an in-flight confirm, and a confirm that crosses its 120s deadline. Cancel enqueues it itself instead of relying on the losing worker to survive and finalize; both paths take the order row lock first, so the unique key is a backstop rather than a 500.
 - **One Alembic revision, Settings complete at first appearance.** Work types are `TEXT` + `CHECK`, not `ENUM`s, so `void_ticket` did not need `ALTER TYPE`. Growing Settings or the schema across slices would have been migration churn.
 
 ## Check

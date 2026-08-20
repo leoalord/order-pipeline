@@ -681,9 +681,10 @@ export function PresenterRail({
           <button
             type="button"
             disabled={disabled}
+            title="Rehearsal only — confirm is milliseconds, so a live click can land after being prepared and return 409. The pytest that holds confirm in-flight is the proof."
             onClick={() => void run("/loadgen/beat/cancel-race")}
           >
-            Cancel race
+            Cancel race (rehearsal)
           </button>
           <button
             type="button"
@@ -725,6 +726,11 @@ export function PresenterRail({
             Restore stock
           </button>
         </div>
+        <p className="rail-note">
+          Cancel race is a rehearsal: confirm completes in milliseconds, so a
+          live click can land after being prepared, return 409, and increment
+          invalid transitions. The in-flight pytest is the proof.
+        </p>
       </details>
       </div>
 
